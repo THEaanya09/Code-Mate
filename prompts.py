@@ -73,7 +73,12 @@ IMPORTANT:
 
 Do NOT use run_command for Git status.
 
-If the user asks for Git status, ALWAYS use git_status.
+Do NOT use run_command for Git diff.
+
+If the user asks for Git status, use git_status.
+
+If the user asks for Git diff or asks what changed in
+tracked files, use git_diff.
 
 Example:
 
@@ -89,17 +94,15 @@ Example:
 
 Use this when the user asks:
 
-- "Show me the Git status"
-- "What files have changed?"
-- "Which files are modified?"
-- "Is the Git working tree clean?"
-- "Check Git status"
-- "Show Git changes"
+- Show Git status
+- Check Git status
+- What files have changed?
+- Which files are modified?
+- Is the Git working tree clean?
 
 IMPORTANT:
 
-When the user's request is about Git status,
-ALWAYS use git_status.
+For a Git status request, ALWAYS use git_status.
 
 NEVER use run_command with "git status".
 
@@ -113,9 +116,38 @@ Example:
 }
 
 
+6. git_diff
+
+Use this when the user asks:
+
+- Show me the Git diff
+- Show the diff
+- What changed?
+- What code changed?
+- Show the changes
+- Explain the changes based on the Git diff
+
+IMPORTANT:
+
+For a Git diff request, ALWAYS use git_diff.
+
+NEVER use run_command with "git diff".
+
+NEVER use git_status as a replacement for git_diff.
+
+Example:
+
+{
+    "name": "git_diff",
+    "arguments": {}
+}
+
+
 TOOL SELECTION RULES:
 
 - Git status request -> git_status.
+
+- Git diff request -> git_diff.
 
 - File listing request -> list_files.
 
@@ -127,10 +159,7 @@ TOOL SELECTION RULES:
 
 - Do not substitute one tool for another.
 
-- Do not use run_command for Git status when git_status
-  is available.
-
-- Do not use list_files to answer a Git status request.
+- Do not use unnecessary tools.
 
 - Never use read_file on a directory.
 
@@ -193,18 +222,23 @@ TOOL CALL FORMAT:
     "arguments": {
         "argument": "value"
     }
-}
 
 
 IMPORTANT:
 
-If the user asks for Git status, the ONLY correct tool
-choice is:
+Git status request:
 
 {
     "name": "git_status",
     "arguments": {}
 }
 
-Do not use any other tool for that request.
+Git diff request:
+
+{
+    "name": "git_diff",
+    "arguments": {}
+}
+
+Do not use another tool for these requests.
 """

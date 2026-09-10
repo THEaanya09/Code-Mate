@@ -111,13 +111,6 @@ def run_agent(user_input):
                 "successfully."
             )
 
-            # IMPORTANT:
-            # Do not send the model back into
-            # another tool loop.
-            #
-            # We already have the useful result.
-            # Return that result directly.
-
             for item in reversed(tool_history):
 
                 if (
@@ -131,10 +124,7 @@ def run_agent(user_input):
                 ):
 
                     print("\nFinal answer:")
-
-                    print(
-                        item["result"]
-                    )
+                    print(item["result"])
 
                     return
 
@@ -148,9 +138,6 @@ def run_agent(user_input):
                 "\nAgent tried to repeat "
                 "the same tool call."
             )
-
-            # Instead of continuing forever,
-            # tell the model to answer directly.
 
             messages.append(
                 {
@@ -208,7 +195,7 @@ def run_agent(user_input):
         print(result)
 
         # --------------------------------
-        # Save tool history
+        # Save history
         # --------------------------------
 
         tool_history.append(
@@ -223,7 +210,7 @@ def run_agent(user_input):
         print(tool_history)
 
         # --------------------------------
-        # Simple listing request
+        # Simple file listing request
         # --------------------------------
 
         if tool_name == "list_files":
@@ -305,4 +292,4 @@ DECIDE THE NEXT ACTION CAREFULLY.
     print(
         "Agent stopped because the maximum "
         "number of steps was reached."
-    )  
+    )
