@@ -222,10 +222,61 @@ def git_status():
         return f"ERROR: {str(e)}"
 
 
+def git_diff():
+
+    try:
+
+        result = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--",
+                "workspace"
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=WORKSPACE
+        )
+
+        if result.returncode != 0:
+
+            return (
+                "ERROR: Git diff failed.\n"
+                + result.stderr.strip()
+            )
+
+        output = result.stdout.strip()
+
+        if not output:
+
+            return "No tracked changes found in the workspace."
+
+        return output
+
+    except FileNotFoundError:
+
+        return (
+            "ERROR: Git is not installed "
+            "or is not available in PATH."
+        )
+
+    except subprocess.TimeoutExpired:
+
+        return (
+            "ERROR: Git diff timed out."
+        )
+
+    except Exception as e:
+
+        return f"ERROR: {str(e)}"
+
+
 TOOLS = {
     "list_files": list_files,
     "read_file": read_file,
     "write_file": write_file,
     "run_command": run_command,
-    "git_status": git_status
+    "git_status": git_status,
+    "git_diff": git_diff
 }

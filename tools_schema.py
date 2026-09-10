@@ -45,8 +45,16 @@ TOOLS_SCHEMA = [
     {
         "name": "git_status",
         "description": (
-            "Show the current Git working tree status "
-            "of the workspace."
+            "Show the current Git working tree status."
+        ),
+        "arguments": {}
+    },
+
+    {
+        "name": "git_diff",
+        "description": (
+            "Show the Git diff for tracked files "
+            "inside the workspace."
         ),
         "arguments": {}
     }
