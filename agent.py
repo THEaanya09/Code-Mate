@@ -1,3 +1,4 @@
+import os
 import ollama
 
 from config import MODEL, MAX_AGENT_STEPS
@@ -6,6 +7,16 @@ from prompts import SYSTEM_PROMPT
 from executor import (
     parse_tool_calls,
     execute_tool
+)
+
+
+OLLAMA_HOST = os.getenv(
+    "OLLAMA_HOST",
+    "http://localhost:11434"
+)
+
+ollama_client = ollama.Client(
+    host=OLLAMA_HOST
 )
 
 
@@ -23,18 +34,13 @@ def was_tool_already_used(
     tool_call,
     tool_history
 ):
-
-    tool_name = tool_call.get(
-        "name"
-    )
-
+    tool_name = tool_call.get("name")
     arguments = tool_call.get(
         "arguments",
         {}
     )
 
     for item in tool_history:
-
         if (
             item["tool"] == tool_name
             and item["arguments"] == arguments
@@ -42,7 +48,6 @@ def was_tool_already_used(
                 item["result"]
             ).startswith("ERROR")
         ):
-
             return True
 
     return False
@@ -52,25 +57,17 @@ def get_previous_tool_result(
     tool_call,
     tool_history
 ):
-
-    tool_name = tool_call.get(
-        "name"
-    )
-
+    tool_name = tool_call.get("name")
     arguments = tool_call.get(
         "arguments",
         {}
     )
 
-    for item in reversed(
-        tool_history
-    ):
-
+    for item in reversed(tool_history):
         if (
             item["tool"] == tool_name
             and item["arguments"] == arguments
         ):
-
             return item["result"]
 
     return None
@@ -118,7 +115,6 @@ def clean_final_answer(
             if not result.startswith(
                 "ERROR"
             ):
-
                 return result
 
     return answer
@@ -131,7 +127,6 @@ def run_agent(user_input):
             "role": "system",
             "content": SYSTEM_PROMPT
         },
-
         {
             "role": "user",
             "content": user_input
@@ -139,7 +134,6 @@ def run_agent(user_input):
     ]
 
     tool_history = []
-
     previous_tool_call = None
 
     for step in range(
@@ -154,7 +148,7 @@ def run_agent(user_input):
         # LLM
         # ====================================
 
-        response = ollama.chat(
+        response = ollama_client.chat(
             model=MODEL,
             messages=messages
         )
@@ -390,20 +384,24 @@ final answer now.
 TOOL OBSERVATION
 
 Original user request:
+
 {user_input}
 
 Tool:
+
 {tool_name}
 
 Arguments:
+
 {arguments}
 
 Status:
+
 {status}
 
 Result:
-{result}
 
+{result}
 
 IMPORTANT:
 
