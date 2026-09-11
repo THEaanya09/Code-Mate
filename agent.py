@@ -2,10 +2,21 @@ import ollama
 
 from config import MODEL, MAX_AGENT_STEPS
 from prompts import SYSTEM_PROMPT
+
 from executor import (
     parse_tool_calls,
     execute_tool
 )
+
+
+VALID_TOOLS = {
+    "list_files",
+    "read_file",
+    "write_file",
+    "run_command",
+    "git_status",
+    "git_diff"
+}
 
 
 def was_tool_already_used(
@@ -13,7 +24,9 @@ def was_tool_already_used(
     tool_history
 ):
 
-    tool_name = tool_call.get("name")
+    tool_name = tool_call.get(
+        "name"
+    )
 
     arguments = tool_call.get(
         "arguments",
@@ -35,6 +48,82 @@ def was_tool_already_used(
     return False
 
 
+def get_previous_tool_result(
+    tool_call,
+    tool_history
+):
+
+    tool_name = tool_call.get(
+        "name"
+    )
+
+    arguments = tool_call.get(
+        "arguments",
+        {}
+    )
+
+    for item in reversed(
+        tool_history
+    ):
+
+        if (
+            item["tool"] == tool_name
+            and item["arguments"] == arguments
+        ):
+
+            return item["result"]
+
+    return None
+
+
+def clean_final_answer(
+    content,
+    tool_history
+):
+    """
+    Clean weak model final answers.
+
+    If the model says only:
+        The task is complete.
+
+    use the latest successful tool result.
+    """
+
+    answer = (
+        content
+        .replace(
+            "Final answer:",
+            ""
+        )
+        .strip()
+    )
+
+    weak_answers = {
+        "the task is complete.",
+        "the task is complete",
+        "task complete.",
+        "task complete"
+    }
+
+    if answer.lower() in weak_answers:
+
+        if tool_history:
+
+            latest = tool_history[-1]
+
+            result = str(
+                latest["result"]
+            )
+
+            if not result.startswith(
+                "ERROR"
+            ):
+
+                return result
+
+    return answer
+
+
 def run_agent(user_input):
 
     messages = [
@@ -53,11 +142,17 @@ def run_agent(user_input):
 
     previous_tool_call = None
 
-    for step in range(MAX_AGENT_STEPS):
+    for step in range(
+        MAX_AGENT_STEPS
+    ):
 
         print(
             f"\n--- Agent step {step + 1} ---"
         )
+
+        # ====================================
+        # LLM
+        # ====================================
 
         response = ollama.chat(
             model=MODEL,
@@ -71,72 +166,53 @@ def run_agent(user_input):
         print("\nLLM:")
         print(content)
 
+        # ====================================
+        # Parse
+        # ====================================
+
         tool_calls = parse_tool_calls(
             content
         )
 
-        # --------------------------------
-        # No tool call = final answer
-        # --------------------------------
+        # ====================================
+        # Final Answer
+        # ====================================
 
         if not tool_calls:
 
-            final_answer = (
-                content
-                .replace(
-                    "Final answer:",
-                    ""
-                )
-                .strip()
+            final_answer = clean_final_answer(
+                content,
+                tool_history
             )
 
-            print("\nFinal answer:")
+            print(
+                "\nFinal answer:"
+            )
+
             print(final_answer)
 
-            return
+            return final_answer
 
         tool_call = tool_calls[0]
 
-        # --------------------------------
-        # Detect repeated successful tool
-        # --------------------------------
+        tool_name = tool_call.get(
+            "name"
+        )
 
-        if was_tool_already_used(
-            tool_call,
-            tool_history
-        ):
+        arguments = tool_call.get(
+            "arguments",
+            {}
+        )
 
-            print(
-                "\nTool already executed "
-                "successfully."
-            )
+        # ====================================
+        # Unknown Tool
+        # ====================================
 
-            for item in reversed(tool_history):
-
-                if (
-                    item["tool"]
-                    == tool_call["name"]
-                    and item["arguments"]
-                    == tool_call.get(
-                        "arguments",
-                        {}
-                    )
-                ):
-
-                    print("\nFinal answer:")
-                    print(item["result"])
-
-                    return
-
-        # --------------------------------
-        # Detect immediate duplicate
-        # --------------------------------
-
-        if tool_call == previous_tool_call:
+        if tool_name not in VALID_TOOLS:
 
             print(
-                "\nAgent tried to repeat "
-                "the same tool call."
+                "\nUnknown tool:",
+                tool_name
             )
 
             messages.append(
@@ -150,10 +226,97 @@ def run_agent(user_input):
                 {
                     "role": "user",
                     "content": (
-                        "You already executed this "
-                        "exact tool call.\n\n"
-                        "Do not call any tool again.\n"
-                        "Provide the final answer now."
+                        f"""
+The tool '{tool_name}' does not exist.
+
+ONLY use these valid tools:
+
+list_files
+read_file
+write_file
+run_command
+git_status
+git_diff
+
+Do not invent tools.
+
+If the user's request cannot be completed
+with the available tools, provide a final
+answer explaining why.
+
+Otherwise use exactly ONE valid tool.
+"""
+                    )
+                }
+            )
+
+            previous_tool_call = None
+
+            continue
+
+        # ====================================
+        # Duplicate Successful Tool
+        # ====================================
+
+        if was_tool_already_used(
+            tool_call,
+            tool_history
+        ):
+
+            previous_result = (
+                get_previous_tool_result(
+                    tool_call,
+                    tool_history
+                )
+            )
+
+            print(
+                "\nTool already executed "
+                "successfully."
+            )
+
+            print(
+                "\nFinal answer:"
+            )
+
+            print(previous_result)
+
+            return previous_result
+
+        # ====================================
+        # Immediate Duplicate
+        # ====================================
+
+        if tool_call == previous_tool_call:
+
+            print(
+                "\nRepeated tool call detected."
+            )
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": content
+                }
+            )
+
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        """
+You already called that exact tool.
+
+Do NOT repeat it.
+
+Use the existing result if it is enough
+to answer the user.
+
+Otherwise choose a different valid tool.
+
+If the task is complete, provide the
+final answer now.
+"""
                     )
                 }
             )
@@ -164,18 +327,9 @@ def run_agent(user_input):
 
         previous_tool_call = tool_call
 
-        # --------------------------------
-        # Get arguments
-        # --------------------------------
-
-        arguments = tool_call.get(
-            "arguments",
-            {}
-        )
-
-        # --------------------------------
-        # Execute tool
-        # --------------------------------
+        # ====================================
+        # Execute
+        # ====================================
 
         tool_name, result = execute_tool(
             tool_call
@@ -191,12 +345,15 @@ def run_agent(user_input):
             arguments
         )
 
-        print("\nTool result:")
+        print(
+            "\nTool result:"
+        )
+
         print(result)
 
-        # --------------------------------
-        # Save history
-        # --------------------------------
+        # ====================================
+        # History
+        # ====================================
 
         tool_history.append(
             {
@@ -206,23 +363,9 @@ def run_agent(user_input):
             }
         )
 
-        print("\nTool history:")
-        print(tool_history)
-
-        # --------------------------------
-        # Simple file listing request
-        # --------------------------------
-
-        if tool_name == "list_files":
-
-            print("\nFinal answer:")
-            print(result)
-
-            return
-
-        # --------------------------------
-        # Add assistant response
-        # --------------------------------
+        # ====================================
+        # Conversation update
+        # ====================================
 
         messages.append(
             {
@@ -233,13 +376,11 @@ def run_agent(user_input):
 
         status = (
             "ERROR"
-            if str(result).startswith("ERROR")
+            if str(result).startswith(
+                "ERROR"
+            )
             else "SUCCESS"
         )
-
-        # --------------------------------
-        # Add tool observation
-        # --------------------------------
 
         messages.append(
             {
@@ -251,8 +392,11 @@ TOOL OBSERVATION
 Original user request:
 {user_input}
 
-Tool executed:
+Tool:
 {tool_name}
+
+Arguments:
+{arguments}
 
 Status:
 {status}
@@ -260,36 +404,47 @@ Status:
 Result:
 {result}
 
-Tool history:
-{tool_history}
 
+IMPORTANT:
 
-DECIDE THE NEXT ACTION CAREFULLY.
+If this result already answers the
+original request, provide the final
+answer immediately.
 
-- Do exactly what the user asked.
-- Do not invent extra tasks.
-- Do not repeat a successful tool call.
-- If the tool result already answers the
-  user's request, provide the final answer now.
-- If the original request is complete, provide
-  the final answer immediately.
-- Do not call the same successful tool again.
-- Use another tool only if it is genuinely
-  necessary to complete the original request.
-- Include the actual useful result in the
-  final answer.
-- Do not answer only with "The task is complete."
-- Do not repeat these instructions.
-- Use exactly ONE tool call if another tool
-  is necessary.
+The final answer MUST contain the
+actual useful result.
+
+Do NOT say only:
+
+"The task is complete."
+
+Do not repeat a successful tool call.
+
+Do not invent a tool.
+
+Only use another tool if it is genuinely
+necessary to complete the original request.
+
+If another tool is necessary, use exactly
+ONE valid tool call.
 """
                 )
             }
         )
 
-    print("\nFinal answer:")
+    # ========================================
+    # Max Steps
+    # ========================================
 
-    print(
+    final_answer = (
         "Agent stopped because the maximum "
         "number of steps was reached."
     )
+
+    print(
+        "\nFinal answer:"
+    )
+
+    print(final_answer)
+
+    return final_answer

@@ -1,134 +1,234 @@
 import json
 
 from tools import TOOLS
-from tools_schema import TOOLS_SCHEMA
-
-
-def is_valid_tool_call(tool_call):
-
-    if not isinstance(tool_call, dict):
-        return False
-
-    if "name" not in tool_call:
-        return False
-
-    if "arguments" not in tool_call:
-        return False
-
-    tool_names = {
-        tool["name"]
-        for tool in TOOLS_SCHEMA
-    }
-
-    if tool_call["name"] not in tool_names:
-        return False
-
-    if not isinstance(
-        tool_call["arguments"],
-        dict
-    ):
-        return False
-
-    return True
 
 
 def parse_tool_calls(content):
+    """
+    Parse one tool call from the LLM response.
+
+    Supported formats:
+
+    1. JSON
+    2. Markdown JSON
+    3. Simple text format
+
+       run_command
+       -> command: "python hello.py"
+    """
 
     content = content.strip()
 
-    # Remove Markdown fences
-    content = content.replace(
-        "```json",
-        ""
-    )
+    if not content:
+        return []
 
-    content = content.replace(
-        "```",
-        ""
-    )
+    # ========================================
+    # Remove markdown code fences
+    # ========================================
 
-    content = content.strip()
+    cleaned = content
 
-    decoder = json.JSONDecoder()
+    if cleaned.startswith("```"):
 
-    tool_calls = []
+        lines = cleaned.splitlines()
 
-    index = 0
+        if lines:
+            lines = lines[1:]
 
-    while index < len(content):
+        if (
+            lines
+            and lines[-1].strip() == "```"
+        ):
+            lines = lines[:-1]
 
-        if content[index] != "{":
+        cleaned = "\n".join(
+            lines
+        ).strip()
 
-            index += 1
-            continue
+    # ========================================
+    # JSON object
+    # ========================================
+
+    try:
+
+        data = json.loads(cleaned)
+
+        if (
+            isinstance(data, dict)
+            and "name" in data
+            and "arguments" in data
+        ):
+
+            return [data]
+
+    except json.JSONDecodeError:
+        pass
+
+    # ========================================
+    # JSON embedded inside text
+    # ========================================
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+
+    if start != -1 and end != -1:
+
+        json_part = cleaned[
+            start:end + 1
+        ]
 
         try:
 
-            obj, consumed = decoder.raw_decode(
-                content[index:]
+            data = json.loads(
+                json_part
             )
 
-            if is_valid_tool_call(obj):
+            if (
+                isinstance(data, dict)
+                and "name" in data
+                and "arguments" in data
+            ):
 
-                tool_calls.append(obj)
-
-            index += consumed
+                return [data]
 
         except json.JSONDecodeError:
+            pass
 
-            index += 1
+    # ========================================
+    # Simple text format
+    #
+    # run_command
+    # -> command: "python hello.py"
+    # ========================================
 
-    return tool_calls
+    lines = [
+        line.strip()
+        for line in cleaned.splitlines()
+        if line.strip()
+    ]
 
+    if not lines:
+        return []
 
-def parse_tool_call(content):
+    tool_name = lines[0]
 
-    tool_calls = parse_tool_calls(content)
+    if tool_name not in TOOLS:
+        return []
 
-    if not tool_calls:
-        return None
+    arguments = {}
 
-    return tool_calls[0]
+    for line in lines[1:]:
+
+        if "->" in line:
+
+            line = line.replace(
+                "->",
+                "",
+                1
+            ).strip()
+
+        if ":" not in line:
+            continue
+
+        key, value = line.split(
+            ":",
+            1
+        )
+
+        key = key.strip()
+        value = value.strip()
+
+        # Remove quotes
+        if (
+            len(value) >= 2
+            and value[0] == '"'
+            and value[-1] == '"'
+        ):
+
+            value = value[1:-1]
+
+        elif (
+            len(value) >= 2
+            and value[0] == "'"
+            and value[-1] == "'"
+        ):
+
+            value = value[1:-1]
+
+        arguments[key] = value
+
+    return [
+        {
+            "name": tool_name,
+            "arguments": arguments
+        }
+    ]
 
 
 def execute_tool(tool_call):
+    """
+    Execute a parsed tool call.
 
-    if not tool_call:
+    Returns:
+        (tool_name, result)
+    """
 
-        return None, "Not a tool call."
+    tool_name = tool_call.get(
+        "name"
+    )
 
-    if not is_valid_tool_call(tool_call):
+    arguments = tool_call.get(
+        "arguments",
+        {}
+    )
 
-        return None, "Invalid tool call."
+    if tool_name not in TOOLS:
 
-    tool_name = tool_call["name"]
+        return (
+            tool_name,
+            (
+                f"ERROR: Unknown tool "
+                f"'{tool_name}'."
+            )
+        )
 
-    arguments = tool_call["arguments"]
+    if not isinstance(
+        arguments,
+        dict
+    ):
 
-    # Normalize nested argument values
-    for key, value in arguments.items():
-
-        if (
-            isinstance(value, dict)
-            and "value" in value
-        ):
-
-            arguments[key] = value["value"]
-
-    tool = TOOLS.get(tool_name)
-
-    if not tool:
-
-        return tool_name, (
-            f"ERROR: Unknown tool '{tool_name}'"
+        return (
+            tool_name,
+            (
+                "ERROR: Tool arguments "
+                "must be an object."
+            )
         )
 
     try:
 
-        result = tool(**arguments)
+        result = TOOLS[tool_name](
+            **arguments
+        )
+
+        return (
+            tool_name,
+            str(result)
+        )
+
+    except TypeError as e:
+
+        return (
+            tool_name,
+            (
+                f"ERROR: Invalid arguments "
+                f"for '{tool_name}': {e}"
+            )
+        )
 
     except Exception as e:
 
-        result = f"ERROR: {str(e)}"
-
-    return tool_name, result
+        return (
+            tool_name,
+            f"ERROR: {str(e)}"
+        )
