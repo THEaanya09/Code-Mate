@@ -1,205 +1,125 @@
+
 import os
-import shlex
 import subprocess
 
-from config import WORKSPACE
+WORKSPACE = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "workspace")
+)
 
 
-# ========================================
-# Workspace Path Safety
-# ========================================
+def get_safe_path(file_path: str) -> str:
+    if not file_path:
+        raise ValueError("File path cannot be empty.")
 
-def get_safe_path(path):
-    """
-    Convert a relative workspace path into an
-    absolute safe path.
+    if os.path.isabs(file_path):
+        raise ValueError("Absolute paths are not allowed.")
 
-    Prevents access outside the workspace.
-    """
+    normalized = os.path.normpath(file_path)
 
-    path = str(path).strip().strip('"').strip("'")
+    if normalized == ".." or normalized.startswith(".." + os.sep):
+        raise ValueError("Path traversal is not allowed.")
+
+    full_path = os.path.abspath(
+        os.path.join(WORKSPACE, normalized)
+    )
 
     workspace_root = os.path.abspath(WORKSPACE)
 
-    full_path = os.path.abspath(
-        os.path.join(
-            workspace_root,
-            path
-        )
-    )
-
-    try:
-
-        common_path = os.path.commonpath(
-            [
-                workspace_root,
-                full_path
-            ]
-        )
-
-    except ValueError:
-
-        raise ValueError(
-            "Access outside workspace is not allowed."
-        )
-
-    if common_path != workspace_root:
-
-        raise ValueError(
-            "Access outside workspace is not allowed."
-        )
+    if not (
+        full_path == workspace_root
+        or full_path.startswith(workspace_root + os.sep)
+    ):
+        raise ValueError("Access outside workspace is not allowed.")
 
     return full_path
 
 
-# ========================================
-# List Files
-# ========================================
-
-def list_files(path: str = ".") -> str:
-    """
-    List files and directories inside the workspace.
-
-    Args:
-        path: Relative directory path.
-
-    Returns:
-        List of files and directories.
-    """
-
+def list_files(path: str = ""):
     try:
+        target_dir = WORKSPACE
 
-        safe_path = get_safe_path(path)
+        if path:
+            target_dir = get_safe_path(path)
 
-        if not os.path.isdir(safe_path):
-
-            return (
-                f"ERROR: '{path}' "
-                "is not a directory."
-            )
+        if not os.path.isdir(target_dir):
+            return f"ERROR: '{path}' is not a directory."
 
         files = []
 
-        for item in sorted(
-            os.listdir(safe_path)
-        ):
+        for root, dirs, filenames in os.walk(target_dir):
+            dirs[:] = [
+                d
+                for d in dirs
+                if d not in {
+                    ".git",
+                    "__pycache__",
+                    ".venv",
+                    "venv",
+                    "myenv"
+                }
+            ]
 
-            full_path = os.path.join(
-                safe_path,
-                item
-            )
-
-            if os.path.isdir(full_path):
-
+            for filename in filenames:
+                full_path = os.path.join(root, filename)
+                relative_path = os.path.relpath(
+                    full_path,
+                    WORKSPACE
+                )
                 files.append(
-                    f"[DIR] {item}"
+                    relative_path.replace(os.sep, "/")
                 )
 
-            else:
-
-                files.append(
-                    f"[FILE] {item}"
-                )
+        files.sort()
 
         if not files:
-
             return "Workspace is empty."
 
         return "\n".join(files)
 
     except Exception as e:
-
         return f"ERROR: {str(e)}"
 
 
-# ========================================
-# Read File
-# ========================================
-
-def read_file(file_path: str) -> str:
-    """
-    Read the contents of a specific file.
-
-    Args:
-        file_path: Relative path of the file.
-
-    Returns:
-        File contents.
-    """
-
+def read_file(file_path: str):
     try:
-
-        safe_path = get_safe_path(
-            file_path
-        )
+        safe_path = get_safe_path(file_path)
 
         if not os.path.isfile(safe_path):
-
-            return (
-                f"ERROR: '{file_path}' "
-                "is not a file."
-            )
+            return f"ERROR: '{file_path}' is not a file."
 
         with open(
             safe_path,
             "r",
             encoding="utf-8"
         ) as file:
+            content = file.read()
 
-            return file.read()
+        max_output = 20000
 
-    except UnicodeDecodeError:
+        if len(content) > max_output:
+            content = (
+                content[:max_output]
+                + "\n\n[File content truncated.]"
+            )
 
-        return (
-            f"ERROR: '{file_path}' "
-            "is not a UTF-8 text file."
-        )
+        return content
 
     except Exception as e:
-
         return f"ERROR: {str(e)}"
 
 
-# ========================================
-# Write File
-# ========================================
-
-def write_file(
-    file_path: str,
-    content: str
-) -> str:
-    """
-    Create or modify a file inside the workspace.
-
-    Args:
-        file_path: Relative path of the file.
-        content: Complete file content.
-
-    Returns:
-        Success or error message.
-    """
-
+def write_file(file_path: str, content: str):
     try:
+        safe_path = get_safe_path(file_path)
 
-        safe_path = get_safe_path(
-            file_path
-        )
-
-        parent = os.path.dirname(
-            safe_path
-        )
-
-        os.makedirs(
-            parent,
-            exist_ok=True
-        )
+        parent = os.path.dirname(safe_path)
+        os.makedirs(parent, exist_ok=True)
 
         with open(
             safe_path,
             "w",
             encoding="utf-8"
         ) as file:
-
             file.write(content)
 
         return (
@@ -208,13 +128,8 @@ def write_file(
         )
 
     except Exception as e:
-
         return f"ERROR: {str(e)}"
 
-
-# ========================================
-# Command Security
-# ========================================
 
 BLOCKED_COMMANDS = {
     "del",
@@ -232,7 +147,7 @@ BLOCKED_COMMANDS = {
     "regedit",
     "takeown",
     "icacls",
-    "cipher",
+    "cipher"
 }
 
 
@@ -243,81 +158,24 @@ BLOCKED_GIT_COMMANDS = {
     "restore",
     "rebase",
     "push",
-    "pull",
+    "pull"
 }
 
 
-def get_first_command(command):
-    """
-    Extract the first executable from a command.
-    """
+def get_first_command(command: str):
+    command = command.strip()
 
-    try:
-
-        parts = shlex.split(
-            command,
-            posix=False
-        )
-
-        if not parts:
-
-            return ""
-
-        executable = parts[0]
-
-        executable = os.path.basename(
-            executable
-        )
-
-        executable = (
-            executable
-            .lower()
-            .strip('"')
-            .strip("'")
-        )
-
-        if executable.endswith(".exe"):
-
-            executable = executable[:-4]
-
-        return executable
-
-    except Exception:
-
+    if not command:
         return ""
 
+    return command.split()[0].lower()
 
-def is_command_safe(command):
-    """
-    Perform basic safety checks on a shell command.
 
-    Returns:
-        (True, "") if safe.
-        (False, reason) if blocked.
-    """
-
-    if not isinstance(
-        command,
-        str
-    ):
-
-        return (
-            False,
-            "Command must be a string."
-        )
+def is_command_safe(command: str):
+    if not command or not command.strip():
+        return False, "Command cannot be empty."
 
     command_lower = command.lower().strip()
-
-    if not command_lower:
-
-        return (
-            False,
-            "Empty command is not allowed."
-        )
-
-    # ====================================
-    # Block shell chaining / redirection
-    # ====================================
 
     dangerous_patterns = [
         "&&",
@@ -328,127 +186,45 @@ def is_command_safe(command):
         "$(",
         "`",
         "\n",
-        "\r",
+        "\r"
     ]
 
     for pattern in dangerous_patterns:
-
         if pattern in command_lower:
-
-            return (
-                False,
-                "Command contains blocked "
-                f"shell operator: {pattern}"
+            return False, (
+                f"Blocked shell operator: {pattern}"
             )
 
-    # ====================================
-    # Identify executable
-    # ====================================
+    first_command = get_first_command(command_lower)
 
-    executable = get_first_command(
-        command
-    )
-
-    if not executable:
-
-        return (
-            False,
-            "Could not determine command."
+    if first_command in BLOCKED_COMMANDS:
+        return False, (
+            f"Blocked command: {first_command}"
         )
 
-    # ====================================
-    # Block dangerous commands
-    # ====================================
+    if first_command == "git":
+        parts = command_lower.split()
 
-    if executable in BLOCKED_COMMANDS:
-
-        return (
-            False,
-            f"Command '{executable}' "
-            "is blocked for safety."
-        )
-
-    # ====================================
-    # Git safety
-    # ====================================
-
-    if executable == "git":
-
-        try:
-
-            parts = shlex.split(
-                command,
-                posix=False
-            )
-
-            if len(parts) > 1:
-
-                git_operation = (
-                    parts[1]
-                    .lower()
-                    .strip('"')
-                    .strip("'")
-                )
-
-                if (
-                    git_operation
-                    in BLOCKED_GIT_COMMANDS
-                ):
-
-                    return (
-                        False,
-                        f"Git operation "
-                        f"'{git_operation}' "
-                        "is blocked for safety."
-                    )
-
-        except Exception:
-
-            return (
-                False,
-                "Could not safely parse "
-                "Git command."
+        if (
+            len(parts) > 1
+            and parts[1] in BLOCKED_GIT_COMMANDS
+        ):
+            return False, (
+                f"Blocked git operation: {parts[1]}"
             )
 
     return True, ""
 
 
-# ========================================
-# Run Command
-# ========================================
-
-def run_command(command: str) -> str:
-    """
-    Execute a command inside the workspace
-    after basic safety validation.
-
-    Args:
-        command: Command to execute.
-
-    Returns:
-        Command output or error.
-    """
-
+def run_command(command: str):
     try:
-
-        # ====================================
-        # Safety check
-        # ====================================
-
-        safe, reason = is_command_safe(
-            command
-        )
+        safe, reason = is_command_safe(command)
 
         if not safe:
-
             return (
-                "ERROR: Command blocked "
-                f"for safety. {reason}"
+                "ERROR: Command blocked for safety. "
+                + reason
             )
-
-        # ====================================
-        # Normalize Python commands
-        # ====================================
 
         command = command.replace(
             "python3",
@@ -459,15 +235,7 @@ def run_command(command: str) -> str:
             command.startswith("./")
             and command.endswith(".py")
         ):
-
-            command = (
-                "python "
-                + command[2:]
-            )
-
-        # ====================================
-        # Execute command
-        # ====================================
+            command = "python " + command[2:]
 
         result = subprocess.run(
             command,
@@ -479,179 +247,95 @@ def run_command(command: str) -> str:
         )
 
         stdout = result.stdout.strip()
-
         stderr = result.stderr.strip()
-
-        # ====================================
-        # Limit output size
-        # ====================================
 
         max_output = 10000
 
         if len(stdout) > max_output:
-
             stdout = (
                 stdout[:max_output]
                 + "\n\n[Output truncated.]"
             )
 
         if len(stderr) > max_output:
-
             stderr = (
                 stderr[:max_output]
                 + "\n\n[Error output truncated.]"
             )
 
-        # ====================================
-        # Build response
-        # ====================================
-
         output_parts = []
 
         if stdout:
-
-            output_parts.append(
-                stdout
-            )
+            output_parts.append(stdout)
 
         if stderr:
-
             output_parts.append(
-                "ERROR:\n"
-                + stderr
+                "ERROR:\n" + stderr
             )
 
         if not output_parts:
-
             if result.returncode == 0:
-
-                return (
-                    "Command executed successfully."
-                )
+                return "Command executed successfully."
 
             return (
-                "ERROR: Command exited "
-                f"with code {result.returncode}."
+                "ERROR: Command exited with code "
+                + str(result.returncode)
+                + "."
             )
 
-        output = "\n".join(
-            output_parts
-        )
+        output = "\n".join(output_parts)
 
         if result.returncode != 0:
-
             output = (
-                "ERROR: Command exited "
-                f"with code {result.returncode}.\n"
+                "ERROR: Command exited with code "
+                + str(result.returncode)
+                + ".\n"
                 + output
             )
 
         return output
 
     except subprocess.TimeoutExpired:
-
         return (
             "ERROR: Command timed out "
             "after 30 seconds."
         )
 
     except Exception as e:
-
         return f"ERROR: {str(e)}"
 
 
-# ========================================
-# Git Status
-# ========================================
-
-def git_status() -> str:
-    """
-    Show Git status for files inside the workspace.
-
-    Returns:
-        Git status output.
-    """
-
+def git_status():
     try:
-
-        repo_root = os.path.abspath(
-            os.path.join(
-                WORKSPACE,
-                ".."
-            )
-        )
-
         result = subprocess.run(
-            [
-                "git",
-                "status",
-                "--short",
-                "--",
-                "workspace"
-            ],
+            ["git", "status", "--short"],
+            cwd=os.path.abspath(
+                os.path.join(WORKSPACE, "..")
+            ),
             capture_output=True,
             text=True,
-            timeout=30,
-            cwd=repo_root
+            timeout=30
         )
 
         if result.returncode != 0:
-
             return (
-                "ERROR: Git status failed.\n"
+                "ERROR: "
                 + result.stderr.strip()
             )
 
         output = result.stdout.strip()
 
         if not output:
-
-            return (
-                "Git working tree is clean."
-            )
+            return "Working tree is clean."
 
         return output
 
-    except FileNotFoundError:
-
-        return (
-            "ERROR: Git is not installed "
-            "or is not available in PATH."
-        )
-
-    except subprocess.TimeoutExpired:
-
-        return (
-            "ERROR: Git status timed out."
-        )
-
     except Exception as e:
-
         return f"ERROR: {str(e)}"
 
 
-# ========================================
-# Git Diff
-# ========================================
-
-def git_diff() -> str:
-    """
-    Show Git diff for tracked files
-    inside the workspace.
-
-    Returns:
-        Git diff output.
-    """
-
+def git_diff():
     try:
-
-        repo_root = os.path.abspath(
-            os.path.join(
-                WORKSPACE,
-                ".."
-            )
-        )
-
         result = subprocess.run(
             [
                 "git",
@@ -659,51 +343,38 @@ def git_diff() -> str:
                 "--",
                 "workspace"
             ],
+            cwd=os.path.abspath(
+                os.path.join(WORKSPACE, "..")
+            ),
             capture_output=True,
             text=True,
-            timeout=30,
-            cwd=repo_root
+            timeout=30
         )
 
         if result.returncode != 0:
-
             return (
-                "ERROR: Git diff failed.\n"
+                "ERROR: "
                 + result.stderr.strip()
             )
 
         output = result.stdout.strip()
 
         if not output:
+            return "No changes in workspace."
 
-            return (
-                "No tracked changes found "
-                "in the workspace."
+        max_output = 20000
+
+        if len(output) > max_output:
+            output = (
+                output[:max_output]
+                + "\n\n[Diff truncated.]"
             )
 
         return output
 
-    except FileNotFoundError:
-
-        return (
-            "ERROR: Git is not installed "
-            "or is not available in PATH."
-        )
-
-    except subprocess.TimeoutExpired:
-
-        return (
-            "ERROR: Git diff timed out."
-        )
-
     except Exception as e:
-
         return f"ERROR: {str(e)}"
 
-
-# ========================================
-# Tool Registry
-# ========================================
 
 TOOLS = {
     "list_files": list_files,

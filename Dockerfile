@@ -2,17 +2,19 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Create a non-root user
 RUN useradd --create-home --shell /bin/bash codemate \
     && chown -R codemate:codemate /app
 
-# Run CodeMate as non-root user
 USER codemate
 
 EXPOSE 8000

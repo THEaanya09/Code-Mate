@@ -1,25 +1,19 @@
+import json
 import os
 
 import ollama
 
-from config import MODEL, MAX_AGENT_STEPS
+from executor import parse_tool_calls, execute_tool
 from prompts import SYSTEM_PROMPT
-from executor import (
-    parse_tool_calls,
-    execute_tool
-)
 
 
+MODEL = "qwen2.5-coder:3b"
 OLLAMA_HOST = os.getenv(
     "OLLAMA_HOST",
     "http://localhost:11434"
 )
 
-
-ollama_client = ollama.Client(
-    host=OLLAMA_HOST
-)
-
+ollama_client = ollama.Client(host=OLLAMA_HOST)
 
 VALID_TOOLS = {
     "list_files",
@@ -30,117 +24,171 @@ VALID_TOOLS = {
     "git_diff"
 }
 
+MAX_STEPS = 12
 
-def was_tool_already_used(
-    tool_call,
-    tool_history
-):
 
-    tool_name = tool_call.get(
-        "name"
-    )
-
-    arguments = tool_call.get(
-        "arguments",
-        {}
-    )
-
-    for item in tool_history:
-
+def was_tool_already_used(history, tool_name, arguments):
+    for item in history:
         if (
-            item["tool"] == tool_name
-            and item["arguments"] == arguments
-            and not str(
-                item["result"]
-            ).startswith("ERROR")
+            item.get("name") == tool_name
+            and item.get("arguments") == arguments
         ):
-
             return True
-
     return False
 
 
-def get_previous_tool_result(
-    tool_call,
-    tool_history
-):
-
-    tool_name = tool_call.get(
-        "name"
-    )
-
-    arguments = tool_call.get(
-        "arguments",
-        {}
-    )
-
-    for item in reversed(
-        tool_history
-    ):
-
-        if (
-            item["tool"] == tool_name
-            and item["arguments"] == arguments
-        ):
-
-            return item["result"]
-
+def get_previous_tool_result(history, tool_name):
+    for item in reversed(history):
+        if item.get("name") == tool_name:
+            return item.get("result")
     return None
 
 
-def clean_final_answer(
-    content,
-    tool_history
-):
+def clean_final_answer(response):
+    if not response:
+        return "Task completed."
 
-    """
-    Clean weak model final answers.
+    response = response.strip()
 
-    If the model says only:
-        The task is complete.
+    # Remove accidental JSON wrapping if the model returns it.
+    try:
+        obj = json.loads(response)
 
-    use the latest successful tool result.
-    """
+        if isinstance(obj, dict):
+            if "response" in obj:
+                return str(obj["response"]).strip()
 
-    answer = (
-        content
-        .replace(
-            "Final answer:",
-            ""
-        )
-        .strip()
+            if "answer" in obj:
+                return str(obj["answer"]).strip()
+    except Exception:
+        pass
+
+    return response
+
+
+def call_llm(messages):
+    response = ollama_client.chat(
+        model=MODEL,
+        messages=messages,
+        options={
+            "temperature": 0.1
+        }
     )
 
-    weak_answers = {
-        "the task is complete.",
-        "the task is complete",
-        "task complete.",
-        "task complete"
-    }
+    return response["message"]["content"]
 
-    if answer.lower() in weak_answers:
 
+def build_grounded_summary(user_request, tool_history):
+    successful = []
+    failed = []
+
+    for item in tool_history:
+        result = str(item.get("result", ""))
+
+        if result.startswith("ERROR:"):
+            failed.append(item)
+        else:
+            successful.append(item)
+
+    evidence = []
+
+    for item in tool_history:
+        evidence.append(
+            "TOOL: "
+            + str(item.get("name"))
+            + "\nARGUMENTS: "
+            + json.dumps(
+                item.get("arguments", {}),
+                ensure_ascii=False
+            )
+            + "\nRESULT:\n"
+            + str(item.get("result", ""))
+        )
+
+    evidence_text = "\n\n---\n\n".join(evidence)
+
+    summary_prompt = f"""
+You are the final response writer for CodeMate.
+
+The user requested:
+
+{user_request}
+
+Below are the ACTUAL tool calls and their ACTUAL results.
+
+You MUST use only this evidence.
+
+Do NOT invent:
+- outputs
+- errors
+- file changes
+- filenames
+- test results
+- numbers
+- successful execution
+
+If the evidence shows an error, say there was an error.
+
+If the evidence shows a successful verification, report that exact result.
+
+If a file was modified, mention the exact filename only if shown
+in the tool evidence.
+
+If the final verification output is available, use that output.
+
+Do not claim that an error occurred unless the tool result actually
+contains that error.
+
+Do not claim that a script produced a particular number unless the
+tool result actually contains that number.
+
+Return a concise factual answer with:
+
+1. What was changed, if anything.
+2. What was verified.
+3. The actual final result.
+
+ACTUAL TOOL EVIDENCE:
+
+{evidence_text}
+"""
+
+    try:
+        response = ollama_client.chat(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": summary_prompt
+                }
+            ],
+            options={
+                "temperature": 0.0
+            }
+        )
+
+        return clean_final_answer(
+            response["message"]["content"]
+        )
+
+    except Exception:
+        # Safe deterministic fallback.
         if tool_history:
+            last = tool_history[-1]
 
-            latest = tool_history[-1]
-
-            result = str(
-                latest["result"]
+            return (
+                "The task reached its final tool result.\n\n"
+                "Last tool: "
+                + str(last.get("name"))
+                + "\n"
+                "Result:\n"
+                + str(last.get("result", ""))
             )
 
-            if not result.startswith(
-                "ERROR"
-            ):
-
-                return result
-
-    return answer
+        return "The task could not be completed."
 
 
-def run_agent(
-    user_input
-):
-
+def run_agent(user_request):
     messages = [
         {
             "role": "system",
@@ -148,377 +196,197 @@ def run_agent(
         },
         {
             "role": "user",
-            "content": user_input
+            "content": user_request
         }
     ]
 
     tool_history = []
 
-    previous_tool_calls = []
+    for step in range(1, MAX_STEPS + 1):
 
-    for step in range(
-        MAX_AGENT_STEPS
-    ):
+        print(f"\n--- Agent step {step} ---")
 
-        print(
-            f"\n--- Agent step {step + 1} ---"
-        )
+        try:
+            response = call_llm(messages)
+        except Exception as e:
+            return (
+                "CodeMate could not contact the LLM.\n\n"
+                f"Error: {e}"
+            )
 
-        # ====================================
-        # LLM
-        # ====================================
+        print("LLM:")
+        print(response)
 
-        response = ollama_client.chat(
-            model=MODEL,
-            messages=messages
-        )
+        tool_calls = parse_tool_calls(response)
 
-        content = (
-            response.message.content.strip()
-        )
-
-        print("\nLLM:")
-        print(content)
-
-        # ====================================
-        # Parse
-        # ====================================
-
-        tool_calls = parse_tool_calls(
-            content
-        )
-
-        # ====================================
-        # Final Answer
-        # ====================================
-
+        # No tool call means the model believes it has enough
+        # information. Generate a grounded final response instead
+        # of trusting its free-form summary.
         if not tool_calls:
+            if tool_history:
+                final_answer = build_grounded_summary(
+                    user_request,
+                    tool_history
+                )
+                print("Final grounded response:")
+                print(final_answer)
+                return final_answer
 
-            final_answer = clean_final_answer(
-                content,
-                tool_history
-            )
-
-            print(
-                "\nFinal answer:"
-            )
-
-            print(
-                final_answer
-            )
-
-            return final_answer
-
-        # ====================================
-        # Execute ALL detected tool calls
-        # ====================================
+            return clean_final_answer(response)
 
         executed_any = False
 
         for tool_call in tool_calls:
 
-            tool_name = tool_call.get(
-                "name"
-            )
-
+            tool_name = tool_call.get("name")
             arguments = tool_call.get(
                 "arguments",
                 {}
             )
 
-            # ====================================
-            # Unknown Tool
-            # ====================================
-
             if tool_name not in VALID_TOOLS:
-
                 print(
-                    "\nUnknown tool:",
+                    "Invalid tool blocked:",
                     tool_name
                 )
 
                 messages.append(
                     {
-                        "role": "assistant",
-                        "content": content
-                    }
-                )
-
-                messages.append(
-                    {
                         "role": "user",
                         "content": (
-                            f"""
-The tool '{tool_name}' does not exist.
-
-ONLY use these valid tools:
-
-list_files
-read_file
-write_file
-run_command
-git_status
-git_diff
-
-Do not invent tools.
-
-If the user's request cannot be completed
-with the available tools, provide a final
-answer explaining why.
-
-Otherwise use valid tools only.
-"""
+                            "ERROR: Invalid tool.\n"
+                            f"'{tool_name}' is not available.\n"
+                            "Use only the six tools listed "
+                            "in the system prompt."
                         )
                     }
                 )
 
                 continue
-
-            # ====================================
-            # Duplicate Successful Tool
-            # ====================================
 
             if was_tool_already_used(
-                tool_call,
-                tool_history
+                tool_history,
+                tool_name,
+                arguments
             ):
-
-                previous_result = (
-                    get_previous_tool_result(
-                        tool_call,
-                        tool_history
-                    )
-                )
-
                 print(
-                    "\nTool already executed "
-                    "successfully."
-                )
-
-                print(
-                    previous_result
-                )
-
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": content
-                    }
+                    "Repeated tool call blocked:",
+                    tool_name
                 )
 
                 messages.append(
                     {
                         "role": "user",
                         "content": (
-                            f"""
-This exact tool call was already executed
-successfully.
-
-Tool:
-{tool_name}
-
-Arguments:
-{arguments}
-
-Previous result:
-{previous_result}
-
-Do NOT repeat this tool call.
-
-Use the existing result if it is enough
-to complete the original request.
-
-If the task is complete, provide the
-final answer now.
-
-If another tool is genuinely necessary,
-use a different valid tool.
-"""
+                            "ERROR: You already executed this "
+                            "exact tool call successfully or "
+                            "attempted it already.\n\n"
+                            "Do NOT repeat it.\n"
+                            "Use the previous result and "
+                            "choose a different next action, "
+                            "or provide the final answer."
                         )
                     }
                 )
 
                 continue
 
-            # ====================================
-            # Immediate Duplicate
-            # ====================================
+            print("Executing tool:", tool_name)
+            print("Arguments:", arguments)
 
-            if tool_call in previous_tool_calls:
-
-                print(
-                    "\nRepeated tool call detected."
-                )
-
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": content
-                    }
-                )
-
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            """
-You already called that exact tool.
-
-Do NOT repeat it.
-
-Use the existing result if it is enough
-to answer the user.
-
-Otherwise choose a different valid tool.
-
-If the task is complete, provide the
-final answer now.
-"""
-                        )
-                    }
-                )
-
-                continue
-
-            previous_tool_calls.append(
-                tool_call
-            )
-
-            # ====================================
-            # Execute
-            # ====================================
-
-            tool_name, result = execute_tool(
-                tool_call
-            )
-
-            executed_any = True
-
-            print(
-                "\nExecuting tool:",
-                tool_name
-            )
-
-            print(
-                "Arguments:",
+            result = execute_tool(
+                tool_name,
                 arguments
             )
 
-            print(
-                "\nTool result:"
-            )
+            print("Tool result:")
+            print(result)
 
-            print(
-                result
-            )
+            history_item = {
+                "name": tool_name,
+                "arguments": arguments,
+                "result": result
+            }
 
-            # ====================================
-            # History
-            # ====================================
+            tool_history.append(history_item)
+            executed_any = True
 
-            tool_history.append(
-                {
-                    "tool": tool_name,
-                    "arguments": arguments,
-                    "result": result
-                }
-            )
+            if str(result).startswith("ERROR:"):
+                observation = (
+                    "The previous tool execution FAILED.\n\n"
+                    "You MUST use this actual error to decide "
+                    "the next action.\n"
+                    "Do NOT claim the task is complete.\n\n"
+                    "TOOL RESULT:\n"
+                    + str(result)
+                )
+            else:
+                observation = (
+                    "The previous tool execution succeeded.\n\n"
+                    "Use THIS result as the source of truth.\n"
+                    "Do not invent a different result.\n\n"
+                    "TOOL RESULT:\n"
+                    + str(result)
+                )
 
-            # ====================================
-            # Conversation update
-            # ====================================
+                if tool_name == "write_file":
+                    observation += (
+                        "\n\nThe file was modified successfully. "
+                        "Do NOT repeat the same write_file call. "
+                        "Verify the change by reading the file or "
+                        "running the relevant command."
+                    )
+
+                if tool_name == "run_command":
+                    observation += (
+                        "\n\nThis is fresh command output. "
+                        "Base your next decision on this output."
+                    )
 
             messages.append(
                 {
                     "role": "assistant",
-                    "content": content
+                    "content": response
                 }
-            )
-
-            status = (
-                "ERROR"
-                if str(result).startswith(
-                    "ERROR"
-                )
-                else "SUCCESS"
             )
 
             messages.append(
                 {
                     "role": "user",
+                    "content": observation
+                }
+            )
+
+        if not executed_any:
+            # The model attempted only duplicate/invalid calls.
+            # Force it to reason from the evidence already collected.
+            messages.append(
+                {
+                    "role": "user",
                     "content": (
-                        f"""
-TOOL OBSERVATION
-
-Original user request:
-
-{user_input}
-
-Tool:
-
-{tool_name}
-
-Arguments:
-
-{arguments}
-
-Status:
-
-{status}
-
-Result:
-
-{result}
-
-IMPORTANT:
-
-The tool has already been executed.
-
-DO NOT pretend that you executed it.
-
-DO NOT repeat the same successful tool call.
-
-If this result already answers the original
-request, provide the final answer immediately.
-
-The final answer MUST contain the actual
-useful result.
-
-Do NOT say only:
-
-"The task is complete."
-
-If another tool is genuinely necessary to
-complete the original request, use exactly
-ONE different valid tool call.
-"""
+                        "No new tool was executed in this step.\n\n"
+                        "Stop repeating previous tool calls.\n"
+                        "Review the existing tool results and either "
+                        "choose a genuinely new action or provide "
+                        "the final answer."
                     )
                 }
             )
 
-        # ====================================
-        # Multiple tool calls were executed
-        # ====================================
+    # Maximum steps reached.
+    # Do not let the model invent a success message.
+    if tool_history:
+        return build_grounded_summary(
+            user_request,
+            tool_history
+        )
 
-        if executed_any:
+    return "CodeMate reached its maximum number of steps."
 
-            continue
 
-    # ========================================
-    # Max Steps
-    # ========================================
-
-    final_answer = (
-        "Agent stopped because the maximum "
-        "number of steps was reached."
-    )
-
+if __name__ == "__main__":
     print(
-        "\nFinal answer:"
+        run_agent(
+            "Run buggy_test.py and fix it if necessary."
+        )
     )
-
-    print(
-        final_answer
-    )
-
-    return final_answer
