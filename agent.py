@@ -1,9 +1,9 @@
 import os
+
 import ollama
 
 from config import MODEL, MAX_AGENT_STEPS
 from prompts import SYSTEM_PROMPT
-
 from executor import (
     parse_tool_calls,
     execute_tool
@@ -14,6 +14,7 @@ OLLAMA_HOST = os.getenv(
     "OLLAMA_HOST",
     "http://localhost:11434"
 )
+
 
 ollama_client = ollama.Client(
     host=OLLAMA_HOST
@@ -34,13 +35,18 @@ def was_tool_already_used(
     tool_call,
     tool_history
 ):
-    tool_name = tool_call.get("name")
+
+    tool_name = tool_call.get(
+        "name"
+    )
+
     arguments = tool_call.get(
         "arguments",
         {}
     )
 
     for item in tool_history:
+
         if (
             item["tool"] == tool_name
             and item["arguments"] == arguments
@@ -48,6 +54,7 @@ def was_tool_already_used(
                 item["result"]
             ).startswith("ERROR")
         ):
+
             return True
 
     return False
@@ -57,17 +64,25 @@ def get_previous_tool_result(
     tool_call,
     tool_history
 ):
-    tool_name = tool_call.get("name")
+
+    tool_name = tool_call.get(
+        "name"
+    )
+
     arguments = tool_call.get(
         "arguments",
         {}
     )
 
-    for item in reversed(tool_history):
+    for item in reversed(
+        tool_history
+    ):
+
         if (
             item["tool"] == tool_name
             and item["arguments"] == arguments
         ):
+
             return item["result"]
 
     return None
@@ -77,6 +92,7 @@ def clean_final_answer(
     content,
     tool_history
 ):
+
     """
     Clean weak model final answers.
 
@@ -115,12 +131,15 @@ def clean_final_answer(
             if not result.startswith(
                 "ERROR"
             ):
+
                 return result
 
     return answer
 
 
-def run_agent(user_input):
+def run_agent(
+    user_input
+):
 
     messages = [
         {
@@ -134,7 +153,8 @@ def run_agent(user_input):
     ]
 
     tool_history = []
-    previous_tool_call = None
+
+    previous_tool_calls = []
 
     for step in range(
         MAX_AGENT_STEPS
@@ -183,44 +203,52 @@ def run_agent(user_input):
                 "\nFinal answer:"
             )
 
-            print(final_answer)
+            print(
+                final_answer
+            )
 
             return final_answer
 
-        tool_call = tool_calls[0]
-
-        tool_name = tool_call.get(
-            "name"
-        )
-
-        arguments = tool_call.get(
-            "arguments",
-            {}
-        )
-
         # ====================================
-        # Unknown Tool
+        # Execute ALL detected tool calls
         # ====================================
 
-        if tool_name not in VALID_TOOLS:
+        executed_any = False
 
-            print(
-                "\nUnknown tool:",
-                tool_name
+        for tool_call in tool_calls:
+
+            tool_name = tool_call.get(
+                "name"
             )
 
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": content
-                }
+            arguments = tool_call.get(
+                "arguments",
+                {}
             )
 
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"""
+            # ====================================
+            # Unknown Tool
+            # ====================================
+
+            if tool_name not in VALID_TOOLS:
+
+                print(
+                    "\nUnknown tool:",
+                    tool_name
+                )
+
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content
+                    }
+                )
+
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"""
 The tool '{tool_name}' does not exist.
 
 ONLY use these valid tools:
@@ -238,67 +266,102 @@ If the user's request cannot be completed
 with the available tools, provide a final
 answer explaining why.
 
-Otherwise use exactly ONE valid tool.
+Otherwise use valid tools only.
 """
-                    )
-                }
-            )
-
-            previous_tool_call = None
-
-            continue
-
-        # ====================================
-        # Duplicate Successful Tool
-        # ====================================
-
-        if was_tool_already_used(
-            tool_call,
-            tool_history
-        ):
-
-            previous_result = (
-                get_previous_tool_result(
-                    tool_call,
-                    tool_history
+                        )
+                    }
                 )
-            )
 
-            print(
-                "\nTool already executed "
-                "successfully."
-            )
+                continue
 
-            print(
-                "\nFinal answer:"
-            )
+            # ====================================
+            # Duplicate Successful Tool
+            # ====================================
 
-            print(previous_result)
+            if was_tool_already_used(
+                tool_call,
+                tool_history
+            ):
 
-            return previous_result
+                previous_result = (
+                    get_previous_tool_result(
+                        tool_call,
+                        tool_history
+                    )
+                )
 
-        # ====================================
-        # Immediate Duplicate
-        # ====================================
+                print(
+                    "\nTool already executed "
+                    "successfully."
+                )
 
-        if tool_call == previous_tool_call:
+                print(
+                    previous_result
+                )
 
-            print(
-                "\nRepeated tool call detected."
-            )
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content
+                    }
+                )
 
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": content
-                }
-            )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"""
+This exact tool call was already executed
+successfully.
 
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        """
+Tool:
+{tool_name}
+
+Arguments:
+{arguments}
+
+Previous result:
+{previous_result}
+
+Do NOT repeat this tool call.
+
+Use the existing result if it is enough
+to complete the original request.
+
+If the task is complete, provide the
+final answer now.
+
+If another tool is genuinely necessary,
+use a different valid tool.
+"""
+                        )
+                    }
+                )
+
+                continue
+
+            # ====================================
+            # Immediate Duplicate
+            # ====================================
+
+            if tool_call in previous_tool_calls:
+
+                print(
+                    "\nRepeated tool call detected."
+                )
+
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content
+                    }
+                )
+
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            """
 You already called that exact tool.
 
 Do NOT repeat it.
@@ -311,76 +374,80 @@ Otherwise choose a different valid tool.
 If the task is complete, provide the
 final answer now.
 """
-                    )
+                        )
+                    }
+                )
+
+                continue
+
+            previous_tool_calls.append(
+                tool_call
+            )
+
+            # ====================================
+            # Execute
+            # ====================================
+
+            tool_name, result = execute_tool(
+                tool_call
+            )
+
+            executed_any = True
+
+            print(
+                "\nExecuting tool:",
+                tool_name
+            )
+
+            print(
+                "Arguments:",
+                arguments
+            )
+
+            print(
+                "\nTool result:"
+            )
+
+            print(
+                result
+            )
+
+            # ====================================
+            # History
+            # ====================================
+
+            tool_history.append(
+                {
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "result": result
                 }
             )
 
-            previous_tool_call = None
+            # ====================================
+            # Conversation update
+            # ====================================
 
-            continue
-
-        previous_tool_call = tool_call
-
-        # ====================================
-        # Execute
-        # ====================================
-
-        tool_name, result = execute_tool(
-            tool_call
-        )
-
-        print(
-            "\nExecuting tool:",
-            tool_name
-        )
-
-        print(
-            "Arguments:",
-            arguments
-        )
-
-        print(
-            "\nTool result:"
-        )
-
-        print(result)
-
-        # ====================================
-        # History
-        # ====================================
-
-        tool_history.append(
-            {
-                "tool": tool_name,
-                "arguments": arguments,
-                "result": result
-            }
-        )
-
-        # ====================================
-        # Conversation update
-        # ====================================
-
-        messages.append(
-            {
-                "role": "assistant",
-                "content": content
-            }
-        )
-
-        status = (
-            "ERROR"
-            if str(result).startswith(
-                "ERROR"
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": content
+                }
             )
-            else "SUCCESS"
-        )
 
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"""
+            status = (
+                "ERROR"
+                if str(result).startswith(
+                    "ERROR"
+                )
+                else "SUCCESS"
+            )
+
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"""
 TOOL OBSERVATION
 
 Original user request:
@@ -405,30 +472,37 @@ Result:
 
 IMPORTANT:
 
-If this result already answers the
-original request, provide the final
-answer immediately.
+The tool has already been executed.
 
-The final answer MUST contain the
-actual useful result.
+DO NOT pretend that you executed it.
+
+DO NOT repeat the same successful tool call.
+
+If this result already answers the original
+request, provide the final answer immediately.
+
+The final answer MUST contain the actual
+useful result.
 
 Do NOT say only:
 
 "The task is complete."
 
-Do not repeat a successful tool call.
-
-Do not invent a tool.
-
-Only use another tool if it is genuinely
-necessary to complete the original request.
-
-If another tool is necessary, use exactly
-ONE valid tool call.
+If another tool is genuinely necessary to
+complete the original request, use exactly
+ONE different valid tool call.
 """
-                )
-            }
-        )
+                    )
+                }
+            )
+
+        # ====================================
+        # Multiple tool calls were executed
+        # ====================================
+
+        if executed_any:
+
+            continue
 
     # ========================================
     # Max Steps
@@ -443,6 +517,8 @@ ONE valid tool call.
         "\nFinal answer:"
     )
 
-    print(final_answer)
+    print(
+        final_answer
+    )
 
     return final_answer

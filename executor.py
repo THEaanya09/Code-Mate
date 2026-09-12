@@ -1,177 +1,200 @@
 import json
+import re
 
 from tools import TOOLS
 
 
-def parse_tool_calls(content):
+def _extract_json_objects(text):
     """
-    Parse one tool call from the LLM response.
+    Extract multiple JSON objects from arbitrary LLM text.
 
-    Supported formats:
+    Handles cases like:
+    {
+        "name": "write_file",
+        "arguments": {...}
+    }
 
-    1. JSON
-    2. Markdown JSON
-    3. Simple text format
-
-       run_command
-       -> command: "python hello.py"
+    {
+        "name": "run_command",
+        "arguments": {...}
+    }
     """
 
-    content = content.strip()
+    objects = []
 
-    if not content:
-        return []
+    decoder = json.JSONDecoder()
+    index = 0
 
-    # ========================================
-    # Remove markdown code fences
-    # ========================================
+    while index < len(text):
 
-    cleaned = content
+        start = text.find("{", index)
 
-    if cleaned.startswith("```"):
-
-        lines = cleaned.splitlines()
-
-        if lines:
-            lines = lines[1:]
-
-        if (
-            lines
-            and lines[-1].strip() == "```"
-        ):
-            lines = lines[:-1]
-
-        cleaned = "\n".join(
-            lines
-        ).strip()
-
-    # ========================================
-    # JSON object
-    # ========================================
-
-    try:
-
-        data = json.loads(cleaned)
-
-        if (
-            isinstance(data, dict)
-            and "name" in data
-            and "arguments" in data
-        ):
-
-            return [data]
-
-    except json.JSONDecodeError:
-        pass
-
-    # ========================================
-    # JSON embedded inside text
-    # ========================================
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-
-    if start != -1 and end != -1:
-
-        json_part = cleaned[
-            start:end + 1
-        ]
+        if start == -1:
+            break
 
         try:
 
-            data = json.loads(
-                json_part
+            obj, end = decoder.raw_decode(
+                text[start:]
             )
 
-            if (
-                isinstance(data, dict)
-                and "name" in data
-                and "arguments" in data
-            ):
+            if isinstance(obj, dict):
+                objects.append(obj)
 
-                return [data]
+            index = start + end
 
         except json.JSONDecodeError:
-            pass
 
-    # ========================================
-    # Simple text format
+            index = start + 1
+
+    return objects
+
+
+def _normalize_tool_call(obj):
+    """
+    Convert a JSON object into our standard tool-call format.
+    """
+
+    if not isinstance(obj, dict):
+        return None
+
+    name = obj.get("name")
+
+    arguments = obj.get(
+        "arguments",
+        {}
+    )
+
+    if not name:
+        return None
+
+    if not isinstance(arguments, dict):
+        return None
+
+    return {
+        "name": name,
+        "arguments": arguments
+    }
+
+
+def parse_tool_calls(text):
+    """
+    Parse one or multiple tool calls from LLM output.
+
+    Supported formats:
+
+    1. Standard JSON
+    2. Markdown JSON
+    3. Multiple JSON objects
+    4. Simple text tool call
+    """
+
+    if not text:
+        return []
+
+    text = text.strip()
+
+    tool_calls = []
+
+    # ---------------------------------------------------------
+    # 1. Extract all JSON objects from the response
+    # ---------------------------------------------------------
+
+    json_objects = _extract_json_objects(
+        text
+    )
+
+    for obj in json_objects:
+
+        tool_call = _normalize_tool_call(
+            obj
+        )
+
+        if tool_call:
+            tool_calls.append(
+                tool_call
+            )
+
+    if tool_calls:
+        return tool_calls
+
+    # ---------------------------------------------------------
+    # 2. Fallback: simple text format
     #
     # run_command
     # -> command: "python hello.py"
-    # ========================================
+    # ---------------------------------------------------------
 
-    lines = [
-        line.strip()
-        for line in cleaned.splitlines()
-        if line.strip()
-    ]
+    name_match = re.search(
+        r"\b(list_files|read_file|write_file|run_command|git_status|git_diff)\b",
+        text,
+        re.IGNORECASE
+    )
 
-    if not lines:
+    if not name_match:
         return []
 
-    tool_name = lines[0]
-
-    if tool_name not in TOOLS:
-        return []
+    name = name_match.group(1)
 
     arguments = {}
 
-    for line in lines[1:]:
+    if name == "run_command":
 
-        if "->" in line:
-
-            line = line.replace(
-                "->",
-                "",
-                1
-            ).strip()
-
-        if ":" not in line:
-            continue
-
-        key, value = line.split(
-            ":",
-            1
+        match = re.search(
+            r'command\s*:\s*"([^"]*)"',
+            text,
+            re.IGNORECASE
         )
 
-        key = key.strip()
-        value = value.strip()
+        if match:
+            arguments = {
+                "command": match.group(1)
+            }
 
-        # Remove quotes
-        if (
-            len(value) >= 2
-            and value[0] == '"'
-            and value[-1] == '"'
-        ):
+    elif name in {
+        "read_file",
+        "write_file"
+    }:
 
-            value = value[1:-1]
+        match = re.search(
+            r'file_path\s*:\s*"([^"]*)"',
+            text,
+            re.IGNORECASE
+        )
 
-        elif (
-            len(value) >= 2
-            and value[0] == "'"
-            and value[-1] == "'"
-        ):
+        if match:
 
-            value = value[1:-1]
+            arguments["file_path"] = (
+                match.group(1)
+            )
 
-        arguments[key] = value
+    if arguments:
+        return [
+            {
+                "name": name,
+                "arguments": arguments
+            }
+        ]
 
-    return [
-        {
-            "name": tool_name,
-            "arguments": arguments
-        }
-    ]
+    return []
 
 
-def execute_tool(tool_call):
+def execute_tool(
+    tool_call
+):
     """
-    Execute a parsed tool call.
-
-    Returns:
-        (tool_name, result)
+    Execute one tool call safely through the
+    registered TOOLS dictionary.
     """
+
+    if not isinstance(
+        tool_call,
+        dict
+    ):
+        return (
+            None,
+            "Invalid tool call."
+        )
 
     tool_name = tool_call.get(
         "name"
@@ -186,10 +209,7 @@ def execute_tool(tool_call):
 
         return (
             tool_name,
-            (
-                f"ERROR: Unknown tool "
-                f"'{tool_name}'."
-            )
+            f"Unknown tool: {tool_name}"
         )
 
     if not isinstance(
@@ -199,13 +219,18 @@ def execute_tool(tool_call):
 
         return (
             tool_name,
-            (
-                "ERROR: Tool arguments "
-                "must be an object."
-            )
+            "Tool arguments must be a JSON object."
         )
 
     try:
+
+        print(
+            f"Executing tool: {tool_name}"
+        )
+
+        print(
+            f"Arguments: {arguments}"
+        )
 
         result = TOOLS[tool_name](
             **arguments
@@ -213,22 +238,51 @@ def execute_tool(tool_call):
 
         return (
             tool_name,
-            str(result)
+            result
         )
 
-    except TypeError as e:
+    except TypeError as error:
 
         return (
             tool_name,
-            (
-                f"ERROR: Invalid arguments "
-                f"for '{tool_name}': {e}"
-            )
+            f"Invalid arguments for {tool_name}: {error}"
         )
 
-    except Exception as e:
+    except Exception as error:
 
         return (
             tool_name,
-            f"ERROR: {str(e)}"
+            f"Tool execution failed: {error}"
         )
+
+
+def execute_tool_calls(
+    tool_calls
+):
+    """
+    Execute multiple tool calls sequentially.
+
+    Returns a list of:
+
+    {
+        "name": "...",
+        "result": "..."
+    }
+    """
+
+    results = []
+
+    for tool_call in tool_calls:
+
+        tool_name, result = execute_tool(
+            tool_call
+        )
+
+        results.append(
+            {
+                "name": tool_name,
+                "result": result
+            }
+        )
+
+    return results
