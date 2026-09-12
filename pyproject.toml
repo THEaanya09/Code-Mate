@@ -1,12 +1,58 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codemate"
-version = "1.0.0"
+name = "codemate-ai"
+version = "1.0.2"
 description = "AI-powered terminal coding agent"
+readme = "README.md"
 requires-python = ">=3.10"
+
+authors = [
+    { name = "Aanya Sharma" }
+]
+
+dependencies = [
+    "groq>=0.37.0",
+    "python-dotenv>=1.2.1"
+]
+
+keywords = [
+    "ai",
+    "coding-agent",
+    "terminal-agent",
+    "llm",
+    "cli",
+    "developer-tools"
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Testing"
+]
+
+[project.urls]
+Homepage = "https://github.com/THEaanya09/Code-Mate"
+Repository = "https://github.com/THEaanya09/Code-Mate"
+Issues = "https://github.com/THEaanya09/Code-Mate/issues"
+
+[project.scripts]
+codemate = "cli:main"
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.141.0",
+    "uvicorn>=0.35.0",
+    "pydantic>=2.11.0"
+]
 
 [tool.setuptools]
 py-modules = [
@@ -19,6 +65,3 @@ py-modules = [
     "config",
     "logger"
 ]
-
-[project.scripts]
-codemate = "cli:main"

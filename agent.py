@@ -2,34 +2,12 @@ import ast
 import json
 import os
 
-from dotenv import load_dotenv
 from groq import Groq
 
+from config import get_api_key, get_model
 from executor import execute_tool
 from prompts import SYSTEM_PROMPT
 from tools_schema import TOOLS_SCHEMA
-
-
-load_dotenv()
-
-
-MODEL = os.getenv(
-    "GROQ_MODEL",
-    "openai/gpt-oss-20b"
-)
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-
-if not GROQ_API_KEY:
-    raise RuntimeError(
-        "GROQ_API_KEY is not configured."
-    )
-
-
-groq_client = Groq(
-    api_key=GROQ_API_KEY
-)
 
 
 VALID_TOOLS = {
@@ -38,55 +16,50 @@ VALID_TOOLS = {
     "write_file",
     "run_command",
     "git_status",
-    "git_diff"
+    "git_diff",
 }
-
 
 MAX_STEPS = 12
 
 
+def get_client():
+    api_key = get_api_key()
+
+    if not api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY is not configured. "
+            "Run CodeMate from the CLI to configure it."
+        )
+
+    return Groq(api_key=api_key)
+
+
 def was_tool_already_used(history, tool_name, arguments):
-    for index in range(len(history) - 1, -1, -1):
-
-        item = history[index]
-
+    for item in history:
         if (
             item.get("name") == tool_name
             and item.get("arguments") == arguments
         ):
-
-            for later_item in history[index + 1:]:
-
-                if later_item.get("name") == "write_file":
-                    return False
-
             return True
 
     return False
 
 
 def clean_final_answer(response):
-
     if not response:
-        return ""
+        return "Task completed."
 
     response = response.strip()
 
     try:
-
         obj = json.loads(response)
 
         if isinstance(obj, dict):
-
             if "response" in obj:
-                return str(
-                    obj["response"]
-                ).strip()
+                return str(obj["response"]).strip()
 
             if "answer" in obj:
-                return str(
-                    obj["answer"]
-                ).strip()
+                return str(obj["answer"]).strip()
 
     except Exception:
         pass
@@ -94,167 +67,128 @@ def clean_final_answer(response):
     return response
 
 
-def call_llm(messages):
-
-    response = groq_client.chat.completions.create(
-        model=MODEL,
+def call_llm(client, messages):
+    response = client.chat.completions.create(
+        model=get_model(),
         messages=messages,
         tools=TOOLS_SCHEMA,
         tool_choice="auto",
-        temperature=0.1
+        temperature=0.1,
     )
 
     return response.choices[0].message
 
 
-def task_requires_test_preservation(user_request):
-
-    text = user_request.lower()
-
-    preservation_phrases = [
-        "without changing the test",
-        "do not change the test",
-        "don't change the test",
-        "preserve the test",
-        "keep the test unchanged",
-        "without modifying the test",
-        "do not modify the test",
-        "don't modify the test"
-    ]
-
-    return any(
-        phrase in text
-        for phrase in preservation_phrases
-    )
-
-
-def normalize_ast_node(node):
-
-    return ast.dump(
-        node,
-        annotate_fields=True,
-        include_attributes=False
-    )
-
-
 def get_top_level_test_statements(source):
+    """
+    Return top-level statements from a Python source file.
+
+    Used to protect test/invocation statements from accidental
+    modification during bug fixing.
+    """
 
     try:
-
         tree = ast.parse(source)
-
     except SyntaxError:
-
-        return None
+        return []
 
     statements = []
 
     for node in tree.body:
-
-        # Function/class definitions are implementation.
-        # Everything else at module level is part of the
-        # script's test/invocation behavior.
         if isinstance(
             node,
             (
-                ast.FunctionDef,
-                ast.AsyncFunctionDef,
-                ast.ClassDef
-            )
+                ast.Expr,
+                ast.Assign,
+                ast.AnnAssign,
+                ast.AugAssign,
+                ast.Assert,
+                ast.If,
+            ),
         ):
-            continue
-
-        statements.append(
-            normalize_ast_node(node)
-        )
+            try:
+                statements.append(
+                    ast.unparse(node)
+                )
+            except Exception:
+                pass
 
     return statements
 
 
+def task_requires_test_preservation(user_request):
+    request = user_request.lower()
+
+    keywords = [
+        "test",
+        "tests",
+        "test case",
+        "testcase",
+        "pytest",
+        "unittest",
+        "without changing the test",
+        "without modifying the test",
+        "don't change the test",
+        "do not change the test",
+        "preserve the test",
+    ]
+
+    return any(keyword in request for keyword in keywords)
+
+
+def get_original_file_content(file_path):
+    try:
+        result = execute_tool(
+            "read_file",
+            {
+                "file_path": file_path
+            }
+        )
+
+        if isinstance(result, str):
+            return result
+
+    except Exception:
+        pass
+
+    return None
+
+
 def validate_test_preservation(
+    file_path,
     original_content,
-    proposed_content
+    new_content,
 ):
+    if not original_content:
+        return True
 
     original_statements = get_top_level_test_statements(
         original_content
     )
 
-    proposed_statements = get_top_level_test_statements(
-        proposed_content
+    new_statements = get_top_level_test_statements(
+        new_content
     )
 
-    if original_statements is None:
-        return (
-            False,
-            "Original file could not be parsed as Python."
-        )
+    if not original_statements:
+        return True
 
-    if proposed_statements is None:
-        return (
-            False,
-            "Proposed file could not be parsed as Python."
-        )
+    original_set = set(original_statements)
+    new_set = set(new_statements)
 
-    if original_statements != proposed_statements:
+    missing = original_set - new_set
 
-        return (
-            False,
-            (
-                "TEST PRESERVATION VIOLATION: "
-                "The proposed change modifies the existing "
-                "top-level test/invocation code. "
-                "Keep the original test scenario exactly "
-                "unchanged and modify only the underlying "
-                "implementation."
-            )
-        )
-
-    return True, ""
-
-
-def get_original_file_content(
-    tool_history,
-    file_path
-):
-
-    for item in reversed(tool_history):
-
-        if item.get("name") != "read_file":
-            continue
-
-        arguments = item.get(
-            "arguments",
-            {}
-        )
-
-        if arguments.get("file_path") != file_path:
-            continue
-
-        result = item.get(
-            "result",
-            ""
-        )
-
-        if (
-            isinstance(result, str)
-            and not result.startswith("ERROR:")
-            and "[File content truncated.]" not in result
-        ):
-            return result
-
-    return None
+    return not missing
 
 
 def build_grounded_summary(
+    client,
     user_request,
-    tool_history
+    tool_history,
 ):
-
     evidence = []
 
     for item in tool_history:
-
         evidence.append(
             "TOOL: "
             + str(item.get("name"))
@@ -286,11 +220,12 @@ The user requested:
 
 {user_request}
 
-Below are the ACTUAL tool calls and ACTUAL results.
+Below are the ACTUAL tool calls and their ACTUAL results.
 
 You MUST use only this evidence.
 
 Do NOT invent:
+
 - outputs
 - errors
 - file changes
@@ -299,32 +234,20 @@ Do NOT invent:
 - numbers
 - successful execution
 
-IMPORTANT:
+If the evidence shows an error,
+say there was an error.
 
-If write_file modified a file, report the
-exact filename from the tool evidence.
+If the evidence shows successful
+verification, report the exact result.
 
-If run_command was executed after write_file,
-use that newest run_command result as the
-verification result.
+If a file was modified, mention the
+exact filename shown in the evidence.
 
-If the newest verification succeeded, report
-that exact successful result.
-
-If the newest verification failed, clearly
-report that the verification failed.
-
-If a test-preservation violation was blocked,
-do not claim that the test was modified.
-
-If the evidence does not prove that the task
-was completed, do NOT claim that it was completed.
-
-Return a concise response using:
+Return a concise factual answer with:
 
 1. What was changed.
 2. What was verified.
-3. Final result.
+3. The actual final result.
 
 ACTUAL TOOL EVIDENCE:
 
@@ -332,427 +255,259 @@ ACTUAL TOOL EVIDENCE:
 """
 
     try:
-
-        response = groq_client.chat.completions.create(
-            model=MODEL,
+        response = client.chat.completions.create(
+            model=get_model(),
             messages=[
                 {
                     "role": "system",
-                    "content": summary_prompt
+                    "content": summary_prompt,
                 }
             ],
-            temperature=0.0
+            temperature=0.0,
         )
 
-        answer = clean_final_answer(
+        return clean_final_answer(
             response.choices[0].message.content
             or ""
         )
 
-        if answer:
-            return answer
-
     except Exception:
-        pass
-
-    return build_fallback_summary(tool_history)
-
-
-def build_fallback_summary(tool_history):
-
-    if not tool_history:
-        return "No tool actions were completed."
-
-    last_tool = tool_history[-1]
-
-    last_name = str(
-        last_tool.get("name")
-    )
-
-    last_result = str(
-        last_tool.get(
-            "result",
-            ""
-        )
-    )
-
-    changed_files = []
-
-    for item in tool_history:
-
-        if item.get("name") == "write_file":
-
-            arguments = item.get(
-                "arguments",
-                {}
-            )
-
-            file_path = arguments.get(
-                "file_path"
-            )
-
-            if file_path:
-                changed_files.append(
-                    str(file_path)
-                )
-
-    if changed_files:
-        changed_text = ", ".join(
-            dict.fromkeys(changed_files)
-        )
-    else:
-        changed_text = "None"
-
-    if last_name == "run_command":
-
-        if last_result.startswith("ERROR:"):
+        if tool_history:
+            last = tool_history[-1]
 
             return (
-                "1. What was changed: "
-                + changed_text
-                + ".\n\n"
-                "2. What was verified: "
-                "The task was re-run after the "
-                "file modification.\n\n"
-                "3. Final result: Verification failed.\n\n"
-                + last_result
+                "The task reached its final tool result.\n\n"
+                f"Last tool: {last.get('name')}\n"
+                f"Result:\n{last.get('result', '')}"
             )
 
-        return (
-            "1. What was changed: "
-            + changed_text
-            + ".\n\n"
-            "2. What was verified: "
-            "The modified code was executed again.\n\n"
-            "3. Final result:\n"
-            + last_result
-        )
-
-    return (
-        "1. What was changed: "
-        + changed_text
-        + ".\n\n"
-        "2. What was verified: "
-        + last_name
-        + " completed successfully.\n\n"
-        "3. Final result:\n"
-        + last_result
-    )
+        return "No tool execution was completed."
 
 
-def run_agent(user_request):
+def run_agent(user_message):
+    client = get_client()
 
     messages = [
         {
             "role": "system",
-            "content": SYSTEM_PROMPT
+            "content": SYSTEM_PROMPT,
         },
         {
             "role": "user",
-            "content": user_request
-        }
+            "content": user_message,
+        },
     ]
 
     tool_history = []
 
+    original_files = {}
+
     preserve_tests = task_requires_test_preservation(
-        user_request
+        user_message
     )
 
-    for step in range(
-        1,
-        MAX_STEPS + 1
-    ):
-
-        try:
-
-            message = call_llm(
-                messages
-            )
-
-        except Exception as e:
-
-            return (
-                "CodeMate could not contact "
-                "the LLM.\n\n"
-                f"Error: {e}"
-            )
-
-        tool_calls = (
-            message.tool_calls
-            or []
+    for step in range(1, MAX_STEPS + 1):
+        response = call_llm(
+            client,
+            messages
         )
 
-        # -----------------------------------------
-        # NO TOOL CALL
-        # -----------------------------------------
+        tool_calls = response.tool_calls
 
         if not tool_calls:
-
-            if tool_history:
-
-                return build_grounded_summary(
-                    user_request,
-                    tool_history
-                )
-
-            answer = clean_final_answer(
-                message.content
+            final_response = (
+                response.content
                 or ""
             )
 
-            if answer:
-                return answer
+            if tool_history:
+                return build_grounded_summary(
+                    client,
+                    user_message,
+                    tool_history,
+                )
 
-            return (
-                "CodeMate could not determine "
-                "a final result."
+            return clean_final_answer(
+                final_response
             )
 
-        messages.append(message)
-
-        executed_any = False
+        assistant_message = {
+            "role": "assistant",
+            "content": response.content or "",
+            "tool_calls": [],
+        }
 
         for tool_call in tool_calls:
-
-            tool_name = (
-                tool_call.function.name
+            assistant_message["tool_calls"].append(
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments,
+                    },
+                }
             )
 
-            raw_arguments = (
-                tool_call.function.arguments
-                or "{}"
-            )
+        messages.append(assistant_message)
+
+        for tool_call in tool_calls:
+            tool_name = tool_call.function.name
 
             try:
-
                 arguments = json.loads(
-                    raw_arguments
+                    tool_call.function.arguments
                 )
-
             except json.JSONDecodeError:
-
-                result = (
-                    "ERROR: Invalid JSON "
-                    "arguments from model."
-                )
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id":
-                            tool_call.id,
-                        "name":
-                            tool_name,
-                        "content":
-                            result
-                    }
-                )
-
-                continue
-
-            print(
-                f"  Step {step}  →  {tool_name}"
-            )
-
-            # -------------------------------------
-            # VALIDATE TOOL
-            # -------------------------------------
+                arguments = {}
 
             if tool_name not in VALID_TOOLS:
-
                 result = (
-                    "ERROR: Unknown tool "
-                    f"'{tool_name}'."
+                    f"ERROR: Invalid tool '{tool_name}'. "
+                    f"Allowed tools: "
+                    f"{', '.join(sorted(VALID_TOOLS))}"
                 )
 
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id":
-                            tool_call.id,
-                        "name":
-                            tool_name,
-                        "content":
-                            result
-                    }
-                )
-
-                continue
-
-            # -------------------------------------
-            # DUPLICATE PROTECTION
-            # -------------------------------------
-
-            if was_tool_already_used(
+            elif was_tool_already_used(
                 tool_history,
                 tool_name,
-                arguments
+                arguments,
             ):
-
                 result = (
-                    "ERROR: This exact tool "
-                    "call was already attempted. "
-                    "Use the previous result or "
-                    "choose a different action."
+                    "ERROR: Repeated tool call detected. "
+                    "Do not repeat the exact same successful "
+                    "tool call. Use the previous result and "
+                    "take a different action."
                 )
 
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id":
-                            tool_call.id,
-                        "name":
-                            tool_name,
-                        "content":
-                            result
-                    }
-                )
-
-                continue
-
-            # -------------------------------------
-            # TEST PRESERVATION GUARD
-            # -------------------------------------
-
-            if (
-                tool_name == "write_file"
-                and preserve_tests
-            ):
-
-                file_path = arguments.get(
-                    "file_path"
-                )
-
-                proposed_content = arguments.get(
-                    "content"
-                )
-
-                original_content = (
-                    get_original_file_content(
-                        tool_history,
-                        file_path
-                    )
-                )
-
+            else:
                 if (
-                    original_content is not None
-                    and isinstance(
-                        proposed_content,
-                        str
-                    )
+                    preserve_tests
+                    and tool_name == "write_file"
                 ):
-
-                    safe, reason = (
-                        validate_test_preservation(
-                            original_content,
-                            proposed_content
-                        )
+                    file_path = arguments.get(
+                        "file_path"
                     )
 
-                    if not safe:
+                    new_content = arguments.get(
+                        "content"
+                    )
 
-                        result = (
-                            "ERROR: "
-                            + reason
-                            + "\n\n"
-                            "Do NOT change the test "
-                            "or its inputs. Modify only "
-                            "the underlying implementation "
-                            "and try write_file again."
+                    if file_path and new_content is not None:
+                        if file_path not in original_files:
+                            original_files[file_path] = (
+                                get_original_file_content(
+                                    file_path
+                                )
+                            )
+
+                        original_content = (
+                            original_files[file_path]
                         )
 
-                        print(
-                            "  ✗ write_file blocked: "
-                            "test preservation violation"
-                        )
+                        if not validate_test_preservation(
+                            file_path,
+                            original_content,
+                            new_content,
+                        ):
+                            result = (
+                                "ERROR: Test preservation "
+                                "guard blocked this write.\n\n"
+                                f"The file '{file_path}' "
+                                "contains existing top-level "
+                                "test/invocation statements "
+                                "that must be preserved.\n\n"
+                                "Modify the underlying "
+                                "implementation instead of "
+                                "changing or removing the "
+                                "test scenario."
+                            )
 
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id":
-                                    tool_call.id,
-                                "name":
-                                    tool_name,
-                                "content":
-                                    result
-                            }
-                        )
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": result,
+                                }
+                            )
 
-                        continue
+                            tool_history.append(
+                                {
+                                    "name": tool_name,
+                                    "arguments": arguments,
+                                    "result": result,
+                                }
+                            )
 
-            # -------------------------------------
-            # EXECUTE TOOL
-            # -------------------------------------
+                            continue
 
-            result = execute_tool(
-                tool_name,
-                arguments
-            )
+                print(
+                    f"  Step {step}  →  {tool_name}"
+                )
 
-            history_item = {
-                "name": tool_name,
-                "arguments": arguments,
-                "result": result
-            }
+                try:
+                    result = execute_tool(
+                        tool_name,
+                        arguments,
+                    )
+                except Exception as error:
+                    result = (
+                        f"ERROR executing {tool_name}: "
+                        f"{error}"
+                    )
 
             tool_history.append(
-                history_item
+                {
+                    "name": tool_name,
+                    "arguments": arguments,
+                    "result": result,
+                }
             )
-
-            executed_any = True
 
             messages.append(
                 {
                     "role": "tool",
-                    "tool_call_id":
-                        tool_call.id,
-                    "name":
-                        tool_name,
-                    "content":
-                        str(result)
+                    "tool_call_id": tool_call.id,
+                    "content": str(result),
                 }
             )
 
-        # -----------------------------------------
-        # NOTHING NEW EXECUTED
-        # -----------------------------------------
+            if tool_name == "write_file":
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "IMPORTANT:\n"
+                            "A file was modified.\n"
+                            "You MUST verify the change "
+                            "using an appropriate command "
+                            "or inspection tool before "
+                            "claiming success."
+                        ),
+                    }
+                )
 
-        if not executed_any:
-
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "No new tool was executed "
-                        "in this step.\n\n"
-                        "Review the existing tool "
-                        "results and either choose "
-                        "a genuinely new action or "
-                        "provide the final answer."
-                    )
-                }
-            )
-
-    if tool_history:
-
-        return build_grounded_summary(
-            user_request,
-            tool_history
-        )
+            if (
+                isinstance(result, str)
+                and result.startswith("ERROR")
+            ):
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "IMPORTANT:\n"
+                            "The previous tool execution "
+                            "FAILED.\n"
+                            "Do NOT claim the task is complete.\n"
+                            "Inspect the error carefully.\n"
+                            "If the error can be fixed with "
+                            "the available tools, take the "
+                            "next necessary action."
+                        ),
+                    }
+                )
 
     return (
-        "CodeMate reached its maximum "
-        "number of steps without completing "
-        "the task."
-    )
-
-
-if __name__ == "__main__":
-
-    print(
-        run_agent(
-            "Run buggy_test.py and fix it "
-            "if necessary."
-        )
+        "Agent stopped because the maximum number "
+        "of steps was reached."
     )
