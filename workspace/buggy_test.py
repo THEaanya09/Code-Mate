@@ -1,8 +1,7 @@
 def divide(a, b):
     if b == 0:
-        return 'Error: Division by zero'
+        return None
     return a / b
 
-if __name__ == '__main__':
-    print(divide(10, 2))
-    print(divide(10, 0))
+result = divide(10, 0)
+print(result)
