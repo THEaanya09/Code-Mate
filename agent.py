@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 
@@ -18,6 +19,7 @@ MODEL = os.getenv(
 )
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
 
 if not GROQ_API_KEY:
     raise RuntimeError(
@@ -53,9 +55,8 @@ def was_tool_already_used(history, tool_name, arguments):
             and item.get("arguments") == arguments
         ):
 
-            # If a file was written after the previous call,
-            # allow the same call again for fresh verification.
             for later_item in history[index + 1:]:
+
                 if later_item.get("name") == "write_file":
                     return False
 
@@ -65,12 +66,14 @@ def was_tool_already_used(history, tool_name, arguments):
 
 
 def clean_final_answer(response):
+
     if not response:
-        return "Task completed."
+        return ""
 
     response = response.strip()
 
     try:
+
         obj = json.loads(response)
 
         if isinstance(obj, dict):
@@ -92,21 +95,162 @@ def clean_final_answer(response):
 
 
 def call_llm(messages):
+
     response = groq_client.chat.completions.create(
         model=MODEL,
         messages=messages,
         tools=TOOLS_SCHEMA,
         tool_choice="auto",
-        temperature=0.1,
+        temperature=0.1
     )
 
     return response.choices[0].message
+
+
+def task_requires_test_preservation(user_request):
+
+    text = user_request.lower()
+
+    preservation_phrases = [
+        "without changing the test",
+        "do not change the test",
+        "don't change the test",
+        "preserve the test",
+        "keep the test unchanged",
+        "without modifying the test",
+        "do not modify the test",
+        "don't modify the test"
+    ]
+
+    return any(
+        phrase in text
+        for phrase in preservation_phrases
+    )
+
+
+def normalize_ast_node(node):
+
+    return ast.dump(
+        node,
+        annotate_fields=True,
+        include_attributes=False
+    )
+
+
+def get_top_level_test_statements(source):
+
+    try:
+
+        tree = ast.parse(source)
+
+    except SyntaxError:
+
+        return None
+
+    statements = []
+
+    for node in tree.body:
+
+        # Function/class definitions are implementation.
+        # Everything else at module level is part of the
+        # script's test/invocation behavior.
+        if isinstance(
+            node,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef
+            )
+        ):
+            continue
+
+        statements.append(
+            normalize_ast_node(node)
+        )
+
+    return statements
+
+
+def validate_test_preservation(
+    original_content,
+    proposed_content
+):
+
+    original_statements = get_top_level_test_statements(
+        original_content
+    )
+
+    proposed_statements = get_top_level_test_statements(
+        proposed_content
+    )
+
+    if original_statements is None:
+        return (
+            False,
+            "Original file could not be parsed as Python."
+        )
+
+    if proposed_statements is None:
+        return (
+            False,
+            "Proposed file could not be parsed as Python."
+        )
+
+    if original_statements != proposed_statements:
+
+        return (
+            False,
+            (
+                "TEST PRESERVATION VIOLATION: "
+                "The proposed change modifies the existing "
+                "top-level test/invocation code. "
+                "Keep the original test scenario exactly "
+                "unchanged and modify only the underlying "
+                "implementation."
+            )
+        )
+
+    return True, ""
+
+
+def get_original_file_content(
+    tool_history,
+    file_path
+):
+
+    for item in reversed(tool_history):
+
+        if item.get("name") != "read_file":
+            continue
+
+        arguments = item.get(
+            "arguments",
+            {}
+        )
+
+        if arguments.get("file_path") != file_path:
+            continue
+
+        result = item.get(
+            "result",
+            ""
+        )
+
+        if (
+            isinstance(result, str)
+            and not result.startswith("ERROR:")
+            and "[File content truncated.]" not in result
+        ):
+            return result
+
+    return None
 
 
 def build_grounded_summary(
     user_request,
     tool_history
 ):
+
     evidence = []
 
     for item in tool_history:
@@ -142,12 +286,11 @@ The user requested:
 
 {user_request}
 
-Below are the ACTUAL tool calls and their ACTUAL results.
+Below are the ACTUAL tool calls and ACTUAL results.
 
 You MUST use only this evidence.
 
 Do NOT invent:
-
 - outputs
 - errors
 - file changes
@@ -156,20 +299,32 @@ Do NOT invent:
 - numbers
 - successful execution
 
-If the evidence shows an error,
-say there was an error.
+IMPORTANT:
 
-If the evidence shows successful
-verification, report the exact result.
+If write_file modified a file, report the
+exact filename from the tool evidence.
 
-If a file was modified, mention the
-exact filename shown in the evidence.
+If run_command was executed after write_file,
+use that newest run_command result as the
+verification result.
 
-Return a concise factual answer with:
+If the newest verification succeeded, report
+that exact successful result.
+
+If the newest verification failed, clearly
+report that the verification failed.
+
+If a test-preservation violation was blocked,
+do not claim that the test was modified.
+
+If the evidence does not prove that the task
+was completed, do NOT claim that it was completed.
+
+Return a concise response using:
 
 1. What was changed.
 2. What was verified.
-3. The actual final result.
+3. Final result.
 
 ACTUAL TOOL EVIDENCE:
 
@@ -189,35 +344,100 @@ ACTUAL TOOL EVIDENCE:
             temperature=0.0
         )
 
-        return clean_final_answer(
+        answer = clean_final_answer(
             response.choices[0].message.content
             or ""
         )
 
+        if answer:
+            return answer
+
     except Exception:
+        pass
 
-        if tool_history:
+    return build_fallback_summary(tool_history)
 
-            last = tool_history[-1]
+
+def build_fallback_summary(tool_history):
+
+    if not tool_history:
+        return "No tool actions were completed."
+
+    last_tool = tool_history[-1]
+
+    last_name = str(
+        last_tool.get("name")
+    )
+
+    last_result = str(
+        last_tool.get(
+            "result",
+            ""
+        )
+    )
+
+    changed_files = []
+
+    for item in tool_history:
+
+        if item.get("name") == "write_file":
+
+            arguments = item.get(
+                "arguments",
+                {}
+            )
+
+            file_path = arguments.get(
+                "file_path"
+            )
+
+            if file_path:
+                changed_files.append(
+                    str(file_path)
+                )
+
+    if changed_files:
+        changed_text = ", ".join(
+            dict.fromkeys(changed_files)
+        )
+    else:
+        changed_text = "None"
+
+    if last_name == "run_command":
+
+        if last_result.startswith("ERROR:"):
 
             return (
-                "The task reached its final "
-                "tool result.\n\n"
-                "Last tool: "
-                + str(last.get("name"))
-                + "\n"
-                "Result:\n"
-                + str(
-                    last.get(
-                        "result",
-                        ""
-                    )
-                )
+                "1. What was changed: "
+                + changed_text
+                + ".\n\n"
+                "2. What was verified: "
+                "The task was re-run after the "
+                "file modification.\n\n"
+                "3. Final result: Verification failed.\n\n"
+                + last_result
             )
 
         return (
-            "The task could not be completed."
+            "1. What was changed: "
+            + changed_text
+            + ".\n\n"
+            "2. What was verified: "
+            "The modified code was executed again.\n\n"
+            "3. Final result:\n"
+            + last_result
         )
+
+    return (
+        "1. What was changed: "
+        + changed_text
+        + ".\n\n"
+        "2. What was verified: "
+        + last_name
+        + " completed successfully.\n\n"
+        "3. Final result:\n"
+        + last_result
+    )
 
 
 def run_agent(user_request):
@@ -235,14 +455,14 @@ def run_agent(user_request):
 
     tool_history = []
 
+    preserve_tests = task_requires_test_preservation(
+        user_request
+    )
+
     for step in range(
         1,
         MAX_STEPS + 1
     ):
-
-        print(
-            f"\n--- Agent step {step} ---"
-        )
 
         try:
 
@@ -258,49 +478,36 @@ def run_agent(user_request):
                 f"Error: {e}"
             )
 
-        content = (
-            message.content
-            or ""
-        )
-
-        print("LLM:")
-        print(content)
-
         tool_calls = (
             message.tool_calls
             or []
         )
 
-        # -------------------------------------------------
+        # -----------------------------------------
         # NO TOOL CALL
-        # -------------------------------------------------
+        # -----------------------------------------
 
         if not tool_calls:
 
             if tool_history:
 
-                final_answer = (
-                    build_grounded_summary(
-                        user_request,
-                        tool_history
-                    )
+                return build_grounded_summary(
+                    user_request,
+                    tool_history
                 )
 
-                print(
-                    "Final grounded response:"
-                )
-
-                print(final_answer)
-
-                return final_answer
-
-            return clean_final_answer(
-                content
+            answer = clean_final_answer(
+                message.content
+                or ""
             )
 
-        # -------------------------------------------------
-        # ASSISTANT MESSAGE WITH TOOL CALLS
-        # -------------------------------------------------
+            if answer:
+                return answer
+
+            return (
+                "CodeMate could not determine "
+                "a final result."
+            )
 
         messages.append(message)
 
@@ -330,8 +537,6 @@ def run_agent(user_request):
                     "arguments from model."
                 )
 
-                print(result)
-
                 messages.append(
                     {
                         "role": "tool",
@@ -347,18 +552,12 @@ def run_agent(user_request):
                 continue
 
             print(
-                "Tool requested:",
-                tool_name
+                f"  Step {step}  →  {tool_name}"
             )
 
-            print(
-                "Arguments:",
-                arguments
-            )
-
-            # -------------------------------------------------
+            # -------------------------------------
             # VALIDATE TOOL
-            # -------------------------------------------------
+            # -------------------------------------
 
             if tool_name not in VALID_TOOLS:
 
@@ -367,8 +566,6 @@ def run_agent(user_request):
                     f"'{tool_name}'."
                 )
 
-                print(result)
-
                 messages.append(
                     {
                         "role": "tool",
@@ -383,9 +580,9 @@ def run_agent(user_request):
 
                 continue
 
-            # -------------------------------------------------
+            # -------------------------------------
             # DUPLICATE PROTECTION
-            # -------------------------------------------------
+            # -------------------------------------
 
             if was_tool_already_used(
                 tool_history,
@@ -400,11 +597,6 @@ def run_agent(user_request):
                     "choose a different action."
                 )
 
-                print(
-                    "Repeated tool call blocked:",
-                    tool_name
-                )
-
                 messages.append(
                     {
                         "role": "tool",
@@ -419,22 +611,84 @@ def run_agent(user_request):
 
                 continue
 
-            # -------------------------------------------------
-            # EXECUTE
-            # -------------------------------------------------
+            # -------------------------------------
+            # TEST PRESERVATION GUARD
+            # -------------------------------------
 
-            print(
-                "Executing tool:",
-                tool_name
-            )
+            if (
+                tool_name == "write_file"
+                and preserve_tests
+            ):
+
+                file_path = arguments.get(
+                    "file_path"
+                )
+
+                proposed_content = arguments.get(
+                    "content"
+                )
+
+                original_content = (
+                    get_original_file_content(
+                        tool_history,
+                        file_path
+                    )
+                )
+
+                if (
+                    original_content is not None
+                    and isinstance(
+                        proposed_content,
+                        str
+                    )
+                ):
+
+                    safe, reason = (
+                        validate_test_preservation(
+                            original_content,
+                            proposed_content
+                        )
+                    )
+
+                    if not safe:
+
+                        result = (
+                            "ERROR: "
+                            + reason
+                            + "\n\n"
+                            "Do NOT change the test "
+                            "or its inputs. Modify only "
+                            "the underlying implementation "
+                            "and try write_file again."
+                        )
+
+                        print(
+                            "  ✗ write_file blocked: "
+                            "test preservation violation"
+                        )
+
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id":
+                                    tool_call.id,
+                                "name":
+                                    tool_name,
+                                "content":
+                                    result
+                            }
+                        )
+
+                        continue
+
+            # -------------------------------------
+            # EXECUTE TOOL
+            # -------------------------------------
 
             result = execute_tool(
                 tool_name,
                 arguments
             )
-
-            print("Tool result:")
-            print(result)
 
             history_item = {
                 "name": tool_name,
@@ -448,10 +702,6 @@ def run_agent(user_request):
 
             executed_any = True
 
-            # -------------------------------------------------
-            # SEND TOOL RESULT BACK TO MODEL
-            # -------------------------------------------------
-
             messages.append(
                 {
                     "role": "tool",
@@ -464,9 +714,9 @@ def run_agent(user_request):
                 }
             )
 
-        # -------------------------------------------------
-        # NOTHING NEW WAS EXECUTED
-        # -------------------------------------------------
+        # -----------------------------------------
+        # NOTHING NEW EXECUTED
+        # -----------------------------------------
 
         if not executed_any:
 
@@ -484,10 +734,6 @@ def run_agent(user_request):
                 }
             )
 
-    # -----------------------------------------------------
-    # MAX STEPS
-    # -----------------------------------------------------
-
     if tool_history:
 
         return build_grounded_summary(
@@ -497,7 +743,8 @@ def run_agent(user_request):
 
     return (
         "CodeMate reached its maximum "
-        "number of steps."
+        "number of steps without completing "
+        "the task."
     )
 
 

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codemate"
+version = "1.0.0"
+description = "AI-powered terminal coding agent"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+py-modules = [
+    "cli",
+    "agent",
+    "tools",
+    "tools_schema",
+    "executor",
+    "prompts",
+    "config",
+    "logger"
+]
+
+[project.scripts]
+codemate = "cli:main"
