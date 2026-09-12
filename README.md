@@ -21,7 +21,7 @@ CodeMate is available as both:
 ## Live Demo
 
 Try it: `<YOUR_LIVE_DEMO_URL>`
-API docs (Swagger UI): `<YOUR_LIVE_DEMO_URL>/docs`
+API docs (Swagger UI): https://code-mate-8qh7.onrender.com/docs
 
 > First request may take a little longer if the free-tier instance has spun down from inactivity.
 
