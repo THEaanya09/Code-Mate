@@ -2,9 +2,10 @@ import os
 import subprocess
 
 
-# CodeMate always works inside the workspace of the
-# directory from which the user launches the CLI.
+# CodeMate uses the workspace inside the directory
+# from which the CLI is launched.
 PROJECT_ROOT = os.path.abspath(os.getcwd())
+
 WORKSPACE = os.path.abspath(
     os.path.join(PROJECT_ROOT, "workspace")
 )
@@ -120,7 +121,11 @@ def write_file(file_path: str, content: str):
         safe_path = get_safe_path(file_path)
 
         parent = os.path.dirname(safe_path)
-        os.makedirs(parent, exist_ok=True)
+
+        os.makedirs(
+            parent,
+            exist_ok=True
+        )
 
         with open(
             safe_path,
@@ -202,7 +207,9 @@ def is_command_safe(command: str):
                 f"Blocked shell operator: {pattern}"
             )
 
-    first_command = get_first_command(command_lower)
+    first_command = get_first_command(
+        command_lower
+    )
 
     if first_command in BLOCKED_COMMANDS:
         return False, (
@@ -242,7 +249,10 @@ def run_command(command: str):
             command.startswith("./")
             and command.endswith(".py")
         ):
-            command = "python " + command[2:]
+            command = (
+                "python "
+                + command[2:]
+            )
 
         result = subprocess.run(
             command,
@@ -290,7 +300,9 @@ def run_command(command: str):
                 + "."
             )
 
-        output = "\n".join(output_parts)
+        output = "\n".join(
+            output_parts
+        )
 
         if result.returncode != 0:
             output = (
@@ -312,10 +324,28 @@ def run_command(command: str):
         return f"ERROR: {str(e)}"
 
 
-def git_status():
+def git_status(workspace: str):
+    """
+    Get Git status for the current CodeMate project.
+
+    The workspace argument is intentionally required by the
+    tool schema so the LLM always produces a structured
+    argument for this tool call.
+    """
+
+    if workspace != "current":
+        return (
+            "ERROR: Invalid workspace argument. "
+            "Use 'current'."
+        )
+
     try:
         result = subprocess.run(
-            ["git", "status", "--short"],
+            [
+                "git",
+                "status",
+                "--short"
+            ],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -339,7 +369,21 @@ def git_status():
         return f"ERROR: {str(e)}"
 
 
-def git_diff():
+def git_diff(workspace: str):
+    """
+    Get Git diff for the current CodeMate project.
+
+    The workspace argument is intentionally required by the
+    tool schema so the LLM always produces a structured
+    argument for this tool call.
+    """
+
+    if workspace != "current":
+        return (
+            "ERROR: Invalid workspace argument. "
+            "Use 'current'."
+        )
+
     try:
         result = subprocess.run(
             [
