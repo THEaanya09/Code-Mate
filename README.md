@@ -1,75 +1,75 @@
 # CodeMate
 
-![Python](https://img.shields.io/badge/python-3.10-blue)
-![Groq](https://img.shields.io/badge/inference-Groq-F55036)
-![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white)
-![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Status](https://img.shields.io/badge/status-working%20prototype-yellow)
+> A lightweight terminal coding agent that can inspect, modify, execute, and verify code inside a workspace using an LLM.
 
-> A lightweight terminal coding agent that can inspect, modify, execute, and verify code inside a controlled workspace using an LLM.
+**Version:** 1.0.2 &nbsp;·&nbsp; **Status:** early-stage, actively evolving
 
-CodeMate is an AI-powered terminal coding agent built from scratch to understand and implement the core orchestration loop behind modern coding agents.
-
-Instead of being a simple chatbot, CodeMate can decide when it needs to use tools, execute those tools, observe their results, and continue working until the requested task is completed.
-
-CodeMate is available as both:
-
-- a **local CLI coding agent**
-- a **FastAPI HTTP API**
-
-## Live Demo
-
-Try it: `<YOUR_LIVE_DEMO_URL>`
-API docs (Swagger UI): `<YOUR_LIVE_DEMO_URL>/docs`
-
-> First request may take a little longer if the free-tier instance has spun down from inactivity.
+**Live API:** https://code-mate-hmlw.onrender.com &nbsp;·&nbsp; **Docs:** https://code-mate-hmlw.onrender.com/docs
+*(the free-tier instance may take a little longer to respond after periods of inactivity)*
 
 ## Contents
 
-- [Demo](#demo)
-- [Architecture](#architecture)
-- [How the Agent Works](#how-the-agent-works)
-- [CLI](#cli)
-- [Available Tools](#available-tools)
-- [Key Features](#key-features)
+- [Overview](#overview)
 - [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [Running Locally](#running-locally)
-- [Running the API Locally](#running-the-api-locally)
-- [Docker](#docker)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Available Tools](#available-tools)
+- [Installation](#installation)
+- [First Run](#first-run)
+- [Usage](#usage)
 - [API](#api)
-- [Deployment](#deployment)
-- [Security Considerations](#security-considerations)
+- [Docker](#docker)
+- [Development](#development)
+- [Project Structure](#project-structure)
+- [Security](#security)
 - [Limitations](#limitations)
-- [What I Learned](#what-i-learned)
-- [Future Improvements](#future-improvements)
-- [Status](#status)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
 - [License](#license)
 - [Author](#author)
 
 ---
 
-## Demo
+## Overview
 
-### Example: Automatically fixing a runtime error
+CodeMate is an AI-powered terminal coding agent built to understand and implement the core orchestration loop behind modern coding agents, rather than relying on a high-level agent framework.
 
-User:
+Instead of behaving like a simple chatbot, CodeMate decides when it needs to use a tool, executes it, observes the result, and continues working until the task is complete or a maximum step limit is reached.
 
-```text
-Run buggy_test.py. If it fails, inspect the error and fix the file
-so it handles division by zero safely. Then run it again and tell
-me the final result.
-```
+CodeMate is available in two forms:
 
-CodeMate:
+- a **CLI coding agent**, installable from PyPI
+- a **FastAPI HTTP API**, currently deployed on Render
 
-```text
-User Request → LLM → run_command → Runtime Error → read_file
-→ write_file → run_command → Verified Result → Final Response
-```
+This is an early-stage, actively evolving project. See [Limitations](#limitations) and [Roadmap](#roadmap) below.
 
-The important part is that CodeMate does not simply generate code and stop. It follows an execution-observation loop, where each tool result becomes context for the next agent decision.
+---
+
+## Tech Stack
+
+- Python
+- Groq API
+- `openai/gpt-oss-20b`
+- FastAPI
+- Pydantic
+- python-dotenv
+- Docker
+- Git
+- PyPI packaging
+
+---
+
+## Features
+
+- **Agentic coding workflow** — multi-step tasks are handled through an iterative loop rather than a single generated response.
+- **Native tool calling** — tool requests are made through Groq's structured tool-calling interface, not by parsing free-form text.
+- **Error → Inspect → Fix → Verify** — the agent can react to real command failures: run a command, inspect the resulting error, read the relevant file, write a fix, and re-run to verify.
+- **Test preservation** — when fixing a failing test, the agent is instructed to fix the implementation rather than editing the test to force a pass. A programmatic guard reinforces this for supported test-script structures.
+- **Grounded final responses** — final responses are generated from the actual tool execution history, which reduces the chance of the model inventing file changes, outputs, or results that didn't happen.
+- **Workspace isolation** — file operations are restricted to the configured workspace; absolute paths and path-traversal attempts (e.g. `../`) are rejected.
+- **Command restrictions** — command execution is limited to an allowlist and blocks shell operators and selected destructive Git operations.
+- **API-key authentication** — the FastAPI service requires an `X-API-Key` header.
+- **Logging** — API requests and agent activity are logged for debugging and observability.
 
 ---
 
@@ -78,7 +78,7 @@ The important part is that CodeMate does not simply generate code and stop. It f
 ```mermaid
 flowchart TD
     A["User / CLI / API"] --> B["CodeMate Agent<br/>(Agent Loop)"]
-    B -->|"Prompt + Context"| C["Groq API<br/>GPT-OSS 20B"]
+    B -->|"Prompt + Context"| C["Groq API<br/>openai/gpt-oss-20b"]
     C -->|"Native Tool Calls"| D["Tool Executor"]
     D --> E["Files<br/>read / write / list"]
     D --> F["Terminal<br/>command execution"]
@@ -87,15 +87,11 @@ flowchart TD
     F --> H
     G --> H
     H --> I["Agent observes result<br/>and decides next action"]
-    I -->|"Repeat until task complete"| B
+    I -->|"Repeat until task complete or step limit reached"| B
     B --> J["Grounded Final Response"]
 ```
 
----
-
-## How the Agent Works
-
-CodeMate follows a simple agent loop:
+The loop, conceptually:
 
 ```text
 1. Receive user goal
@@ -108,13 +104,9 @@ CodeMate follows a simple agent loop:
 8. Generate a grounded final response
 ```
 
-Conceptually:
-
 ```python
 while task_not_complete:
-
     response = llm(messages)
-
     tool_calls = response.tool_calls
 
     if not tool_calls:
@@ -125,18 +117,98 @@ while task_not_complete:
         messages.append(result)
 ```
 
-This loop is the core orchestration mechanism behind CodeMate.
+A tool call is returned in structured form, for example:
+
+```json
+{
+  "name": "read_file",
+  "arguments": {
+    "file_path": "example.py"
+  }
+}
+```
 
 ---
 
-## CLI
+## Available Tools
 
-CodeMate can be used directly from the terminal.
+| Tool          | Purpose                                         |
+| ------------- | ------------------------------------------------ |
+| `list_files`  | Discover files inside the workspace             |
+| `read_file`   | Read a file                                     |
+| `write_file`  | Create or modify a file                         |
+| `run_command` | Execute an allowed command inside the workspace |
+| `git_status`  | Inspect Git working-tree changes                |
+| `git_diff`    | Inspect workspace differences                   |
+
+The agent is explicitly restricted to these tools and cannot invent arbitrary tool names.
+
+---
+
+## Installation
+
+Install from PyPI:
+
+```bash
+pip install codemate-ai
+```
+
+Note the package name (`codemate-ai`) is different from the CLI command it installs (`codemate`).
+
+Then run:
+
+```bash
+codemate
+```
+
+The first time you run it, CodeMate will walk you through a one-time API key setup — see [First Run](#first-run) below.
+
+*(This package was validated through TestPyPI prior to its PyPI release.)*
+
+---
+
+## First Run
+
+CodeMate uses [Groq](https://console.groq.com) to run `openai/gpt-oss-20b`. You'll need your own Groq API key — it's free to create one at [console.groq.com](https://console.groq.com). Don't use anyone else's key.
+
+If no key is configured yet, the CLI will prompt you:
+
+```text
+Groq API key is not configured.
+
+You only need to do this once.
+Your key will be saved in:
+~/.codemate/.env
+
+Enter your Groq API key:
+```
+
+The key is entered through a hidden, password-style prompt — it is not echoed to the terminal or printed anywhere. It's saved locally at `~/.codemate/.env`, outside the project directory, and future runs load it automatically.
+
+Never commit `~/.codemate/.env`, or any `.env` file, to version control.
+
+---
+
+## Usage
+
+### Interactive mode
+
+```bash
+codemate
+```
+
+```text
+codemate> list the files in the workspace
+codemate> create a Python calculator in the workspace
+codemate> find and fix the bug in buggy_test.py
+```
+
+Exit the session with `exit` or `quit`.
 
 ### One-shot mode
 
 ```bash
-codemate "list the files in the workspace"
+codemate "fix the bug in buggy_test.py"
 ```
 
 Example output:
@@ -156,22 +228,6 @@ Task: list the files in the workspace
 ──────────────────────────────────────────────────
 ```
 
-### Interactive mode
-
-```bash
-codemate
-```
-
-Then enter tasks interactively:
-
-```text
-codemate> inspect calculator.py and fix the bug
-codemate> run the tests
-codemate> explain what you changed
-```
-
-Exit the session with `exit` or `quit`.
-
 ### CLI options
 
 ```bash
@@ -181,230 +237,57 @@ codemate --version
 
 ---
 
-## Available Tools
+## API
 
-CodeMate currently provides six tools:
+CodeMate also exposes a FastAPI-based HTTP API, separate from the CLI.
 
-| Tool          | Purpose                                         |
-| ------------- | ------------------------------------------------ |
-| `list_files`  | Discover files inside the workspace             |
-| `read_file`   | Read a file                                     |
-| `write_file`  | Create or modify a file                         |
-| `run_command` | Execute an allowed command inside the workspace |
-| `git_status`  | Inspect Git working-tree changes                |
-| `git_diff`    | Inspect workspace differences                   |
+**Live deployment:** https://code-mate-hmlw.onrender.com
+**Interactive docs:** https://code-mate-hmlw.onrender.com/docs
 
-The agent is explicitly restricted to these tools and cannot invent arbitrary tool names.
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Health check |
+| `/chat` | POST | Send a task to the agent |
 
----
+Requests require an `X-API-Key` header. Request bodies are validated, and messages have a maximum length.
 
-## Key Features
+### Health check
 
-### Agentic Coding Workflow
-
-CodeMate can perform multi-step coding tasks instead of returning a single generated response.
-
-### Native Tool Calling
-
-CodeMate uses Groq's structured tool calling rather than parsing free-form text. The model requests a specific tool with structured arguments, for example:
+```bash
+curl https://code-mate-hmlw.onrender.com/health
+```
 
 ```json
 {
-  "name": "read_file",
-  "arguments": {
-    "file_path": "example.py"
-  }
+  "status": "ok",
+  "service": "CodeMate"
 }
 ```
 
-### Error → Inspect → Fix → Verify
-
-CodeMate can react to actual command failures:
-
-```text
-run_command → error → read_file → write_file → run_command → verified result
-```
-
-### Test Preservation
-
-When fixing a failing test, CodeMate is instructed to modify the underlying implementation rather than editing the test itself just to make it pass. For supported test-script structures, a programmatic guard enforces this as well, not just the prompt instruction.
-
-### Grounded Final Responses
-
-Final responses are generated using the actual tool execution history. This reduces the chance of the model inventing:
-
-- file changes
-- command outputs
-- errors
-- test results
-- success claims
-
-### Workspace Isolation
-
-File operations are restricted to the CodeMate workspace. Absolute paths and path traversal attempts such as `../` are rejected.
-
-### Command Restrictions
-
-Command execution uses an allowlist of supported commands and blocks shell operators and selected destructive Git operations. This is a basic safety layer, not a production-grade sandbox.
-
-### API Authentication
-
-The FastAPI endpoint supports API-key authentication using the `X-API-Key` header.
-
-### Logging
-
-API requests and agent activity are logged for debugging and observability.
-
----
-
-## Tech Stack
-
-- Python 3.10
-- Groq API
-- GPT-OSS 20B (`openai/gpt-oss-20b`)
-- FastAPI
-- Uvicorn
-- Pydantic
-- Docker
-- Git
-- Python virtual environments
-
----
-
-## Project Structure
-
-```text
-CodeMate/
-│
-├── agent.py
-├── api.py
-├── cli.py
-├── executor.py
-├── tools.py
-├── tools_schema.py
-├── prompts.py
-├── config.py
-├── logger.py
-├── main.py
-│
-├── workspace/
-│   └── Example coding files
-│
-├── Dockerfile
-├── requirements.txt
-├── pyproject.toml
-├── .gitignore
-└── README.md
-```
-
-### Core modules
-
-**`agent.py`** — Implements the main agent loop and coordinates LLM reasoning with tool execution.
-
-**`executor.py`** — Handles tool execution support and dispatching.
-
-**`tools.py`** — Contains the file, terminal, and Git tools.
-
-**`tools_schema.py`** — Defines the structured schemas used for LLM tool calling.
-
-**`prompts.py`** — Defines system instructions that constrain the agent's behavior and available tools.
-
-**`cli.py`** — Provides the local `codemate` command and interactive terminal interface.
-
-**`api.py`** — Exposes CodeMate through a FastAPI HTTP API.
-
-**`logger.py`** — Provides application logging.
-
-**`config.py`** — Handles project configuration and environment variables.
-
----
-
-## Running Locally
-
-### 1. Clone the repository
+### Chat
 
 ```bash
-git clone https://github.com/THEaanya09/Code-Mate
-cd CodeMate
+curl -X POST https://code-mate-hmlw.onrender.com/chat \
+  -H "X-API-Key: <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"list the files in the workspace"}'
 ```
 
-### 2. Create a virtual environment
-
-```bash
-python -m venv myenv
-```
-
-Activate it according to your environment.
-
-### 3. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Install the CodeMate CLI
-
-Install the project in editable mode:
-
-```bash
-pip install -e .
-```
-
-Verify the installation:
-
-```bash
-codemate --version
-```
-
-Expected:
-
-```text
-CodeMate 1.0.0
-```
-
-### 5. Configure Groq
-
-Create a `.env` file:
-
-```env
-GROQ_API_KEY=your-groq-api-key
-GROQ_MODEL=openai/gpt-oss-20b
-CODEMATE_API_KEY=your-secret-key
-```
-
-Do not commit `.env` or expose your API keys publicly.
-
-### 6. Run the CLI
-
-One-shot:
-
-```bash
-codemate "list the files in the workspace"
-```
-
-Interactive:
-
-```bash
-codemate
-```
-
----
-
-## Running the API Locally
-
-Start the FastAPI server:
+During local development, replace the base URL with `http://localhost:8000` after starting the server:
 
 ```bash
 uvicorn api:app --reload
 ```
 
-The API will be available at `http://localhost:8000`, with interactive docs at `http://localhost:8000/docs`.
+**Important:** the API runs in its own server-side workspace, separate from your machine. It cannot read or modify files on your local computer, and the CLI cannot see or affect what happens on the deployed API — they are independent execution environments.
 
 ---
 
 ## Docker
 
-Build the image:
+The Dockerfile packages the FastAPI service (not the CLI) using the Groq-based backend.
+
+Build:
 
 ```bash
 docker build -t codemate .
@@ -425,178 +308,153 @@ docker run --rm \
   codemate
 ```
 
-The image runs CodeMate as a non-root user. Resource limits and workspace mounting are configured through Docker at runtime — they are deployment configuration, not application features.
+The container runs as a non-root user. Resource limits and the workspace mount are configured through Docker at runtime — they're deployment configuration, not application features. Never bake real key values into the image or commit them to version control.
 
 ---
 
-## API
+## Development
 
-### Health Check
-
-```http
-GET /health
-```
+For contributors who want to work on CodeMate directly (rather than installing the published package):
 
 ```bash
-curl http://localhost:8000/health
+git clone https://github.com/THEaanya09/Code-Mate.git
+cd Code-Mate
 ```
 
-Response:
+Create a virtual environment:
 
-```json
-{
-  "status": "ok",
-  "service": "CodeMate"
-}
+```bash
+python -m venv venv
 ```
 
-### Chat
+Activate it:
 
-```http
-POST /chat
+```bash
+# Windows
+venv\Scripts\activate
+
+# macOS / Linux
+source venv/bin/activate
 ```
 
-Headers:
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+To test CLI changes locally, install the project in editable mode:
+
+```bash
+pip install -e .
+codemate --version
+```
+
+Expected:
 
 ```text
-X-API-Key: your-secret-key
-Content-Type: application/json
+CodeMate 1.0.2
 ```
 
-Request:
-
-```json
-{
-  "message": "Run buggy_test.py and fix it if necessary."
-}
-```
-
-Example:
+To run the API locally:
 
 ```bash
-curl -X POST http://localhost:8000/chat \
-  -H "X-API-Key: your-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{"message":"Run buggy_test.py and fix it if necessary."}'
+uvicorn api:app --reload
 ```
+
+Available at `http://localhost:8000`, with interactive docs at `http://localhost:8000/docs`.
 
 ---
 
-## Deployment
-
-CodeMate is deployed as a FastAPI web service on Render, using:
-
-```bash
-uvicorn api:app --host 0.0.0.0 --port $PORT
-```
-
-The deployed API exposes:
+## Project Structure
 
 ```text
-GET  /health
-POST /chat
-GET  /docs
+Code-Mate/
+├── main.py
+├── agent.py
+├── cli.py
+├── api.py
+├── executor.py
+├── tools.py
+├── tools_schema.py
+├── prompts.py
+├── config.py
+├── logger.py
+├── workspace/
+├── requirements.txt
+├── pyproject.toml
+├── Dockerfile
+└── README.md
 ```
 
-### Important deployment note
+**`main.py`** — Project entry point.
 
-The deployed service operates on its own server-side workspace. The local CLI operates on the workspace of the machine where CodeMate is installed. These are separate execution environments — changes made through the public demo do not affect your local project files, and vice versa.
+**`agent.py`** — Implements the main agent loop and coordinates LLM reasoning with tool execution.
+
+**`cli.py`** — Provides the local `codemate` command and interactive terminal interface, including first-run API key setup.
+
+**`api.py`** — Exposes CodeMate through a FastAPI HTTP API.
+
+**`executor.py`** — Dispatches requested tool calls to the corresponding tool implementation.
+
+**`tools.py`** — Contains the file, terminal, and Git tools.
+
+**`tools_schema.py`** — Defines the structured schemas used for LLM tool calling.
+
+**`prompts.py`** — Defines the system instructions that constrain the agent's behavior and available tools.
+
+**`config.py`** — Handles project configuration and environment variables.
+
+**`logger.py`** — Provides application logging.
 
 ---
 
-## Security Considerations
+## Security
 
-CodeMate currently implements several basic protections:
-
-- workspace-relative file access
-- path traversal prevention
-- absolute-path rejection
-- command allowlisting
-- blocked shell operators
-- blocked destructive Git operations
-- API-key authentication
-- maximum message length
-- non-root execution and resource limits when run via Docker
-
-### Important
-
-The command execution layer uses `subprocess` and is designed as a learning/portfolio project. The current safety mechanism is **not equivalent to a production-grade sandbox**. A production implementation should use stronger isolation, such as a dedicated execution sandbox or an isolated container/VM per task.
+- Never commit API keys or `.env` files.
+- The Groq API key is stored locally at `~/.codemate/.env` by the CLI's first-run setup, outside the project directory.
+- The agent is restricted to a fixed set of tools and cannot invent new ones.
+- Command execution goes through an allowlist and blocks shell operators and selected destructive Git operations. This is a basic safety layer, **not a production-grade sandbox** — don't treat it as a fully secure execution environment.
+- Review any code the agent generates or modifies before using it in a sensitive environment.
+- The deployed API and your local machine are separate environments; the API cannot read or modify your local files.
 
 ---
 
 ## Limitations
 
-CodeMate relies on an LLM for tool selection and multi-step reasoning. Because model decisions are probabilistic, the agent can occasionally:
-
-- choose an unnecessary tool
-- make an incorrect implementation decision
-- require additional verification
-- fail to infer the intended behavior when the task specification is ambiguous
-
-The project therefore includes:
-
-- strict tool validation
-- repeated-call protection
-- execution-result feedback
-- test-preservation checks
-- grounded final responses
-- maximum agent-step limits
+- Early-stage, actively evolving project — not production-ready or enterprise-grade.
+- LLM tool selection and reasoning are probabilistic and can occasionally be imperfect: an unnecessary tool call, an incorrect implementation choice, or difficulty inferring intent from an ambiguous task.
+- Tool execution is intentionally constrained, which limits what the agent can do in a single run.
+- The local CLI only operates within its configured local workspace.
+- The remote API operates in its own separate server-side environment.
 
 ---
 
-## What I Learned
+## Roadmap
 
-Building CodeMate required implementing the core pieces of an AI agent system instead of hiding the orchestration behind a high-level framework. The project demonstrates practical understanding of:
-
-- LLM APIs
-- native tool calling
-- agent loops
-- context/message management
-- structured tool schemas
-- tool execution
-- error recovery
-- test preservation
-- API design
-- CLI development
-- Docker containerization
-- authentication
-- filesystem security
-- command restrictions
-- Git integration
-- logging
-- resource constraints
+- Better agent planning
+- More robust verification
+- Additional tools
+- Improved error recovery
+- Richer terminal UI
+- Streaming responses
+- Better packaging / release automation
+- Improved test coverage
+- Better documentation
 
 ---
 
-## Future Improvements
+## Contributing
 
-- streaming responses
-- richer terminal UI
-- better tool schemas
-- stronger sandboxing
-- test generation and execution
-- project-aware code search
-- multi-file refactoring
-- model/provider abstraction
-- persistent conversation sessions
-- human approval for risky operations
-- automated test-driven coding workflows
+CodeMate is primarily a personal learning and portfolio project, but issues, suggestions, and pull requests are welcome. If you'd like to contribute, please open an issue first to discuss the change, then submit a pull request.
 
 ---
 
-## Status
+## License
 
-**Working prototype**
+This project is licensed under the [MIT License](LICENSE).
 
-CodeMate currently supports a complete loop:
-
-```text
-User Goal → LLM → Tool Selection → Tool Execution → Observation
-→ Next Action → Verification → Grounded Final Response
-```
-
-The project is intentionally built around the underlying agent orchestration loop rather than a high-level agent framework.
-
+---
 
 ## Author
 
