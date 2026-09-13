@@ -1,9 +1,12 @@
-
 import os
 import subprocess
 
+
+# CodeMate always works inside the workspace of the
+# directory from which the user launches the CLI.
+PROJECT_ROOT = os.path.abspath(os.getcwd())
 WORKSPACE = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "workspace")
+    os.path.join(PROJECT_ROOT, "workspace")
 )
 
 
@@ -29,7 +32,9 @@ def get_safe_path(file_path: str) -> str:
         full_path == workspace_root
         or full_path.startswith(workspace_root + os.sep)
     ):
-        raise ValueError("Access outside workspace is not allowed.")
+        raise ValueError(
+            "Access outside workspace is not allowed."
+        )
 
     return full_path
 
@@ -61,10 +66,12 @@ def list_files(path: str = ""):
 
             for filename in filenames:
                 full_path = os.path.join(root, filename)
+
                 relative_path = os.path.relpath(
                     full_path,
                     WORKSPACE
                 )
+
                 files.append(
                     relative_path.replace(os.sep, "/")
                 )
@@ -309,9 +316,7 @@ def git_status():
     try:
         result = subprocess.run(
             ["git", "status", "--short"],
-            cwd=os.path.abspath(
-                os.path.join(WORKSPACE, "..")
-            ),
+            cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
             timeout=30
@@ -343,9 +348,7 @@ def git_diff():
                 "--",
                 "workspace"
             ],
-            cwd=os.path.abspath(
-                os.path.join(WORKSPACE, "..")
-            ),
+            cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
             timeout=30
